@@ -1,0 +1,4 @@
+# mermaid.js is provisioned at install time (large third-party file), not tracked
+mermaid.js
+__pycache__/
+*.pyc
