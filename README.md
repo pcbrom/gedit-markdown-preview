@@ -4,7 +4,9 @@ A live Markdown preview for **gedit 46** that you can also write in. It renders
 the open document with pandoc, styled to resemble Apostrophe, in whatever share
 of the window you ask for, beside the editor or below it. Math renders offline as
 native MathML and Mermaid blocks render as figures. Click a block in the preview
-and you edit the Markdown that produced it, in place.
+and you edit the Markdown that produced it, in place. When the writing is done,
+two buttons export the document to PDF or DOCX in an academic layout, typeset by
+pandoc rather than printed from the screen.
 
 Everything runs locally: no CDN, no network, no icon font.
 
@@ -61,8 +63,22 @@ Everything runs locally: no CDN, no network, no icon font.
 
 **Getting it out**
 
-- **Export to PDF** through the print dialog, with diagrams and math already laid
-  out.
+- **Export to PDF and to DOCX**, from the two buttons at the foot of the bar,
+  in an academic layout: A4 with 2.5 cm margins, an 11 pt serif, numbered
+  sections, no first-line indent and space between paragraphs instead. The file
+  lands beside the `.md` with the same name.
+- **It is typeset, not screenshotted.** The Markdown goes through pandoc again,
+  to LaTeX and to Word, so the PDF is set by xelatex and the DOCX carries real
+  Word styles, math you can still edit and a proper table of column widths.
+- **Diagrams and citations come along.** Mermaid blocks arrive as images, and a
+  `references.bib` beside the document is picked up through `--citeproc`.
+- **Print the preview as it looks**, from the menu, when a screen-faithful copy
+  is what you actually want.
+
+**Remembered between sessions**
+
+- The share, the split, and whether the preview was open at all. Close gedit
+  with the preview at 75% side by side and that is how it comes back.
 
 ## Requirements
 
@@ -76,6 +92,11 @@ On Debian/Ubuntu:
 ```bash
 sudo apt-get install gedit pandoc gir1.2-webkit2-4.1
 ```
+
+PDF export additionally needs a LaTeX with `xelatex`. A full TeX Live works;
+[TinyTeX](https://yihui.org/tinytex/) is the smaller way and is found even when
+installed under your home directory, which a desktop launcher's `PATH` misses.
+DOCX export needs nothing beyond pandoc.
 
 The side by side split additionally needs the Tepl introspection data, which
 gedit itself brings. Without it that one button is disabled and everything else
@@ -105,7 +126,8 @@ it via `gsettings`. It is idempotent; run it again to update.
 | Turn edit mode on or off | `Ctrl+E`, the pencil in the bar, or the menu |
 | Edit a block | click it in edit mode; `Ctrl+Enter` or a click outside confirms, `Esc` cancels |
 | Zoom the page | `Ctrl` with plus, minus or zero |
-| Export | menu entry "Export Markdown preview (PDF)", then "Print to File" |
+| Export PDF or DOCX | the two buttons at the foot of the bar, or the menu |
+| Print the preview as shown | menu entry "Print the preview as it looks on screen" |
 
 Opens any `.md`, `.markdown`, `.mdown`, `.mkd` or `.mmd` file.
 
@@ -118,9 +140,13 @@ Some details worth knowing:
   editing.
 - Clicking an outline entry jumps to that section. A large enough zoom narrows
   the page and moves the outline from the side rail to the collapsible block.
-- Export prints the rendered page, which is why it produces PDF rather than HTML:
-  the bundled `mermaid.js` is referenced by path, so a saved HTML file would only
-  render on the machine that made it.
+- Export uses what is in the buffer, so it needs no save first, but it does need
+  the document to have a name, since the file goes beside it. An existing export
+  of the same name is replaced.
+- A YAML block at the top of the document supplies the title, author and
+  abstract. Without one the export simply has no title block.
+- The export reports itself in the preview, naming the file it wrote. Failures
+  are also recorded in `~/.cache/gedit-mdpreview.log`.
 
 Try the files under `examples/`: `math.md` for MathML and `mermaid.md` for
 diagrams.
@@ -181,6 +207,37 @@ the pane's two children, and puts them back when the split returns to stacked.
 **Scroll sync etiquette.** Each side stops reporting for a moment while the other
 drives it, and the last position requested during that pause is applied when it
 ends, so a continuous scroll lands where it ended rather than where it began.
+
+**Export runs pandoc again**, rather than printing the view, which is why the
+result is typeset. Three things the obvious version of that gets wrong:
+
+- pandoc ships no `SourceCode` paragraph style, so in DOCX a code block inherits
+  `Normal` and comes out justified, spreading one line of code across the page.
+  The reference document is patched from pandoc's own, at export time, so no
+  binary is carried here and it follows whatever pandoc is installed.
+- pandoc derives table column widths from the source only when the separator row
+  is itself wide, so the idiomatic `| --- |` table arrives with none and LaTeX
+  sets unbreakable columns that run off the page. A bundled Lua filter gives
+  every such table widths taken from its own content.
+- Mermaid draws its labels in a `foreignObject`, which SVG rasterisers ignore,
+  so a diagram converted from the preview would arrive as empty boxes. Export
+  redraws the diagrams offscreen with HTML labels off, then rasterises them
+  through the same loader that draws the toolbar icon, with no external tool.
+
+The subprocess also builds its own `PATH`, adding `~/bin` and `~/.TinyTeX/bin/*`:
+a desktop launcher never reads your shell profile, so a TeX installed in your
+home directory is otherwise invisible even though the same command works in a
+terminal. The run happens off the main loop, since xelatex takes seconds and
+would freeze the editor.
+
+**What is remembered.** The share, the split and whether the preview was open go
+to `~/.config/gedit-mdpreview.json`, a plain file rather than GSettings, which
+would need a schema compiled and installed alongside the plugin. Restoring the
+split lives in the sizing path rather than in the `Ctrl+M` path, because the
+header-bar button opens the preview too and a restore only one of the two doors
+triggers is no restore. Reopening the preview is deferred and retried when the
+tab settles, because gedit restores the previous session's documents after the
+window exists, and until then there is nothing to render.
 
 **Failures leave a trace.** A plugin launched from the desktop has no visible
 stderr, so an error inside a callback would vanish. Failures while swapping the

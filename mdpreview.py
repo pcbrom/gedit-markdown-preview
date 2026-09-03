@@ -9,8 +9,9 @@
 # Math renders offline as native MathML; ```mermaid blocks and .mmd files render
 # as diagrams via an optional local mermaid.js. The preview updates live (debounced) and
 # keeps the reading position across re-renders. Code blocks are syntax
-# highlighted offline by pandoc, long documents get a navigable outline, and the
-# rendered page can be exported to PDF through the print dialog.
+# highlighted offline by pandoc, and long documents get a navigable outline.
+# The bar exports the document to PDF and to DOCX in an academic layout, typeset
+# by pandoc rather than printed from the screen, beside the .md file.
 import gi
 gi.require_version("Gedit", "3.0")
 gi.require_version("Gtk", "3.0")
@@ -31,6 +32,11 @@ import json
 import traceback
 import os
 import re
+import io
+import shutil
+import tempfile
+import threading
+import zipfile
 import html as _html
 
 PANEL_NAME = "MdPreviewPanel"
@@ -49,6 +55,9 @@ RESCROLL_MS = 160
 SYNC_UNLOCK_MS = 150
 # Zoom of the rendered page, driven by Ctrl with plus, minus and zero. The
 # WebView keeps the level across reloads, so it survives the live update.
+# Delay before a preview left open is opened again, giving gedit time to restore
+# the documents of the previous session.
+RESTORE_OPEN_MS = 700
 ZOOM_MIN = 0.5
 ZOOM_MAX = 3.0
 ZOOM_STEP = 0.1
@@ -109,12 +118,144 @@ _MERMAID_UNWRAP = re.compile(
 _SPAN_TAG = re.compile(r"<span(?P<attrs>[^>]*)>|</span>")
 
 
+# --- export ----------------------------------------------------------------
+# Export does not print the rendered page: it runs the Markdown through pandoc
+# again, to LaTeX or to Word, so the result is typeset rather than a screenshot
+# of a browser. The look is the one journals expect: A4, 2.5 cm margins, an
+# 11 pt serif, numbered sections, no first-line indent and space between
+# paragraphs instead.
+EXPORT_TIMEOUT = 240
+# Extensions beyond the preview's: metadata for title and author, footnotes and
+# definition lists, since an academic document uses all of them.
+EXPORT_FROM = ("gfm+tex_math_dollars+yaml_metadata_block+footnotes"
+               "+definition_lists+pipe_tables+task_lists")
+EXPORT_COMMON = ["--standalone", "--number-sections", "--from=" + EXPORT_FROM]
+# pandoc derives table column widths from the source only when the separator row
+# is itself wide, so the idiomatic "| --- |" table arrives with no widths and
+# LaTeX lays it out in unbreakable l/r columns that run off the page. This
+# filter gives every such table widths taken from its own content, which is what
+# lets a long cell wrap. It ships as source because a Lua filter is a file path
+# on the command line, so it is written out beside each export.
+TABLE_WIDTH_LUA = """
+local stringify = pandoc.utils.stringify
+
+local function widest(rows, index)
+  local most = 0
+  for _, row in ipairs(rows) do
+    local cell = row.cells[index]
+    if cell then
+      local n = utf8.len(stringify(cell.contents) or "") or 0
+      if n > most then most = n end
+    end
+  end
+  return most
+end
+
+function Table(tbl)
+  local count = #tbl.colspecs
+  if count == 0 then return nil end
+  local total = 0
+  for _, spec in ipairs(tbl.colspecs) do
+    total = total + (spec[2] or 0)
+  end
+  -- A table that already carries widths keeps exactly what the author set.
+  if total > 0 then return nil end
+
+  local rows = {}
+  for _, head in ipairs(tbl.head.rows) do rows[#rows + 1] = head end
+  for _, body in ipairs(tbl.bodies) do
+    for _, row in ipairs(body.body) do rows[#rows + 1] = row end
+  end
+
+  -- Width follows the longest cell in the column, so a column of numbers stays
+  -- narrow while a column of prose gets the room it needs. The floor keeps a
+  -- short heading from collapsing into an unreadable ribbon.
+  local floor = 0.06
+  local measures, sum = {}, 0
+  for i = 1, count do
+    measures[i] = math.max(widest(rows, i), 1)
+    sum = sum + measures[i]
+  end
+  local widths, spare = {}, 0
+  for i = 1, count do
+    local w = measures[i] / sum
+    if w < floor then
+      spare = spare + (floor - w)
+      w = floor
+    end
+    widths[i] = w
+  end
+  -- Raising the narrow columns has to come out of the wide ones, or the row
+  -- would add up to more than the page.
+  local over = 0
+  for i = 1, count do
+    if widths[i] > floor then over = over + widths[i] end
+  end
+  for i = 1, count do
+    if widths[i] > floor and over > 0 then
+      widths[i] = widths[i] - spare * (widths[i] / over)
+    end
+    -- 0.97 rather than 1.0: the column separators need somewhere to live.
+    tbl.colspecs[i] = { tbl.colspecs[i][1], widths[i] * 0.97 }
+  end
+  return tbl
+end
+"""
+PDF_VARS = [
+    "--pdf-engine=xelatex", "--highlight-style=tango",
+    "-V", "papersize=a4", "-V", "geometry:margin=2.5cm", "-V", "fontsize=11pt",
+    "-V", "colorlinks=true", "-V", "linkcolor=black",
+    "-V", "urlcolor=[HTML]{1A4F8A}", "-V", "citecolor=[HTML]{1A4F8A}",
+]
+# A Times-alike is the common journal face. The fonts are a separate list so a
+# machine without them can be retried with the LaTeX default instead of failing.
+PDF_FONTS = ["-V", "mainfont=TeX Gyre Termes", "-V", "mathfont=TeX Gyre Termes Math"]
+# Bibliography, when the author keeps one beside the document.
+BIB_NAMES = ("references.bib", "referencias.bib", "bibliography.bib")
+# Diagrams are rasterised at this multiple of their natural size, so they stay
+# sharp on paper rather than at screen resolution.
+DIAGRAM_SCALE = 3
+DIAGRAM_WAIT_MS = 1500
+
 # A plugin launched from the desktop has no visible stderr, so a failure inside a
 # callback would vanish. Recording it gives something to read after the fact.
 ERROR_LOG = os.path.join(
     os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
     "gedit-mdpreview.log",
 )
+
+
+# The share and the split survive between sessions, so the preview opens the way
+# it was left rather than at a fixed default. A small file rather than GSettings,
+# which would need a schema compiled and installed alongside the plugin.
+PREFS_FILE = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")),
+    "gedit-mdpreview.json",
+)
+
+
+def load_prefs():
+    try:
+        with open(PREFS_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        # No preferences yet, or a file someone hand edited into nonsense. The
+        # defaults are perfectly usable, so this is not worth reporting.
+        return {}
+
+
+def save_prefs(data):
+    try:
+        os.makedirs(os.path.dirname(PREFS_FILE), exist_ok=True)
+        tmp = PREFS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        # Replacing in one step, so a crash mid-write cannot leave a half file
+        # that the next session would read as corrupt.
+        os.replace(tmp, PREFS_FILE)
+    except OSError:
+        log_error(traceback.format_exc())
 
 
 def log_error(what):
@@ -349,6 +490,19 @@ body.mdedit { box-shadow: inset 0 0 0 2px rgba(42,118,198,.35); }
 }
 @media print { #mdbar { display: none !important; } }
 
+/* Export runs outside the page, so its outcome has to come back somewhere the
+   reader is already looking. The notice sits clear of the bar and says which
+   file was written, since the export never opens a dialog to say so. */
+#mdtoast {
+  position: fixed; right: 4em; bottom: 1.2em; max-width: 26em; z-index: 30;
+  background: #2e3436; color: #f5f5f5; padding: .6em .8em; border-radius: 6px;
+  font-size: .8em; line-height: 1.4; cursor: pointer; word-break: break-word;
+  box-shadow: 0 2px 10px rgba(0,0,0,.25); transition: opacity .2s;
+}
+#mdtoast.err { background: #8a2020; }
+#mdtoast.busy { background: #1a4f8a; }
+@media print { #mdtoast { display: none !important; } }
+
 textarea.mdedit-box {
   width: 100%; box-sizing: border-box; font-family: "Source Code Pro", monospace;
   font-size: .92em; line-height: 1.5; padding: .6em .8em; border: 2px solid #2a76c6;
@@ -414,7 +568,11 @@ ICONS = {
     "check": "<path d=\"M20 6 9 17l-5-5\"/>",
     "x": "<path d=\"M18 6 6 18\"/><path d=\"m6 6 12 12\"/>",
     "pencil": "<path d=\"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z\"/><path d=\"m15 5 4 4\"/>",
-    "pencil-off": "<path d=\"m10 10-6.157 6.162a2 2 0 0 0-.5.833l-1.322 4.36a.5.5 0 0 0 .622.624l4.358-1.323a2 2 0 0 0 .83-.5L14 13.982\"/><path d=\"m12.829 7.172 4.359-4.346a1 1 0 1 1 3.986 3.986l-4.353 4.353\"/><path d=\"m15 5 4 4\"/><path d=\"m2 2 20 20\"/>"
+    "pencil-off": "<path d=\"m10 10-6.157 6.162a2 2 0 0 0-.5.833l-1.322 4.36a.5.5 0 0 0 .622.624l4.358-1.323a2 2 0 0 0 .83-.5L14 13.982\"/><path d=\"m12.829 7.172 4.359-4.346a1 1 0 1 1 3.986 3.986l-4.353 4.353\"/><path d=\"m15 5 4 4\"/><path d=\"m2 2 20 20\"/>",
+    # The two export icons share the sheet outline and differ in what fills it:
+    # an arrow leaving the page for PDF, a letter for the word processor.
+    "file-down": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"/><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"/><path d=\"M12 18v-6\"/><path d=\"m9 15 3 3 3-3\"/>",
+    "file-type": "<path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z\"/><path d=\"M14 2v4a2 2 0 0 0 2 2h4\"/><path d=\"M9 13v-1h6v1\"/><path d=\"M12 12v6\"/><path d=\"M11 18h2\"/>"
 }
 # Shapes for the header-bar button that swaps the split. They are rasterised
 # into a pixbuf, since a header-bar button takes a widget and not markup.
@@ -443,7 +601,9 @@ TIPS = {
     "check": "Confirm (Ctrl+Enter): writes the block back to its source lines.",
     "x": "Cancel (Esc): discards the edit.",
     "pencil": "Edit in the render: turns edit mode on (Ctrl+E).",
-    "pencil-off": "Leave edit mode (Ctrl+E)."
+    "pencil-off": "Leave edit mode (Ctrl+E).",
+    "file-down": "Export PDF in an academic layout, beside the .md file.",
+    "file-type": "Export DOCX in an academic layout, beside the .md file."
 }
 
 EDIT_SCRIPT = (
@@ -585,7 +745,37 @@ EDIT_SCRIPT = (
     "  }));"
     "  toggleBtn=mkbtn('pencil','',function(){post({kind:'toggle'});});"
     "  bar.appendChild(toggleBtn);"
+    # Export is not an edit, so its buttons stay live whether or not a block is
+    # open, below a rule that separates them from the editing controls.
+    "  var sep2=document.createElement('div');"
+    "  sep2.className='mdbar-sep';"
+    "  bar.appendChild(sep2);"
+    "  bar.appendChild(mkbtn('file-down','',function(){"
+    "   post({kind:'export',fmt:'pdf'});"
+    "  }));"
+    "  bar.appendChild(mkbtn('file-type','',function(){"
+    "   post({kind:'export',fmt:'docx'});"
+    "  }));"
     "  document.body.appendChild(bar);"
+    " };"
+    # The notice survives a re-render only as long as the page does, which is
+    # what we want: it reports one export and then gets out of the way.
+    " var toastTimer=0;"
+    " window.__mdToast=function(text,state){"
+    "  var el=document.getElementById('mdtoast');"
+    "  if(!el){"
+    "   el=document.createElement('div');"
+    "   el.id='mdtoast';"
+    "   el.addEventListener('click',function(){el.remove();});"
+    "   document.body.appendChild(el);"
+    "  }"
+    "  el.textContent=text;"
+    "  el.className=state||'';"
+    "  if(toastTimer){clearTimeout(toastTimer);toastTimer=0;}"
+    "  if(state!=='busy'){"
+    "   toastTimer=setTimeout(function(){if(el){el.remove();}},"
+    "state==='err'?14000:7000);"
+    "  }"
     " };"
     " window.__mdSetEdit=function(flag){"
     "  on=!!flag;"
@@ -666,6 +856,149 @@ def render_body(text, is_mmd):
         return "<pre>" + GLib.markup_escape_text(str(exc)) + "</pre>"
 
 
+# --- export helpers ---------------------------------------------------------
+# A ```mermaid fence in the source, so it can be swapped for the rendered image
+# before pandoc ever sees it. LaTeX and Word have no diagram engine of their own.
+_MMD_FENCE = re.compile(r"^[ \t]*```+[ \t]*mermaid[ \t]*\r?\n(.*?)\r?\n[ \t]*```+[ \t]*$",
+                        re.M | re.S)
+SERIF = "Times New Roman"
+_DOCX_FONTS = ('<w:rFonts w:ascii="%s" w:eastAsia="%s" w:hAnsi="%s" w:cs="%s" />'
+               % (SERIF, SERIF, SERIF, SERIF))
+_DOCX_THEME_FONTS = re.compile(
+    r'<w:rFonts w:(?:ascii|eastAsia|hAnsi|cs)Theme="[^"]*"[^/]*/>')
+# The stock reference paints headings and the abstract title blue, sometimes as
+# a theme colour and sometimes as a literal one. Academic output is black, so
+# every colour goes and the link colour is put back afterwards.
+_DOCX_COLOR = re.compile(r'<w:color w:val="[0-9A-Fa-f]{6}"[^/]*/>')
+_DOCX_STYLE = "<w:style [^>]*w:styleId=\"%s\">.*?</w:style>"
+# A4 with 2.5 cm margins, in twentieths of a point, matching the PDF geometry.
+_DOCX_SECTPR = (
+    "<w:sectPr>"
+    '<w:pgSz w:w="11906" w:h="16838" />'
+    '<w:pgMar w:top="1418" w:right="1418" w:bottom="1418" w:left="1418"'
+    ' w:header="709" w:footer="709" w:gutter="0" />'
+    "</w:sectPr>"
+)
+# pandoc ships no SourceCode paragraph style, so a code block inherits Normal
+# and comes out justified, which spreads a single line of code across the page.
+_DOCX_SOURCECODE = (
+    '<w:style w:type="paragraph" w:customStyle="1" w:styleId="SourceCode">'
+    '<w:name w:val="Source Code" /><w:basedOn w:val="Normal" />'
+    '<w:link w:val="VerbatimChar" />'
+    '<w:pPr><w:jc w:val="left" />'
+    '<w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="auto" />'
+    '<w:shd w:val="clear" w:color="auto" w:fill="F6F6F6" /></w:pPr>'
+    '<w:rPr><w:rFonts w:ascii="Consolas" w:hAnsi="Consolas" w:cs="Consolas" />'
+    '<w:sz w:val="20" /><w:szCs w:val="20" /></w:rPr></w:style>'
+)
+_DOCX_HEADING_SIZES = {"Title": 32, "Heading1": 28, "Heading2": 24,
+                       "Heading3": 22, "Heading4": 22, "Heading5": 22,
+                       "Heading6": 22}
+
+
+def _docx_in_style(xml, style_id, fn):
+    match = re.search(_DOCX_STYLE % style_id, xml, re.S)
+    if not match:
+        return xml
+    return xml[:match.start()] + fn(match.group(0)) + xml[match.end():]
+
+
+def _docx_styles(xml):
+    xml = _DOCX_THEME_FONTS.sub(_DOCX_FONTS, xml)
+    xml = _DOCX_COLOR.sub('<w:color w:val="000000" />', xml)
+    xml = _docx_in_style(xml, "Hyperlink", lambda s: s.replace(
+        '<w:color w:val="000000" />', '<w:color w:val="1A4F8A" />'))
+    # 11 pt, single spaced, 6 pt between paragraphs, justified.
+    xml = xml.replace('<w:sz w:val="24" />\n        <w:szCs w:val="24" />',
+                      '<w:sz w:val="22" />\n        <w:szCs w:val="22" />', 1)
+    xml = xml.replace('<w:spacing w:after="200" />',
+                      '<w:spacing w:after="120" w:line="240" w:lineRule="auto" />'
+                      '<w:jc w:val="both" />', 1)
+    xml = _docx_in_style(xml, "BodyText", lambda s: s.replace(
+        '<w:spacing w:before="180" w:after="180" />',
+        '<w:spacing w:before="0" w:after="120" w:line="240" w:lineRule="auto" />'
+        '<w:jc w:val="both" />'))
+    for style_id, half in _DOCX_HEADING_SIZES.items():
+        def resize(s, half=half):
+            s = re.sub(r'<w:sz w:val="\d+" />', '<w:sz w:val="%d" />' % half, s)
+            return re.sub(r'<w:szCs w:val="\d+" />', '<w:szCs w:val="%d" />' % half, s)
+        xml = _docx_in_style(xml, style_id, resize)
+    # A heading belongs to the text it introduces, not to the section above it.
+    for style_id in ("Heading1", "Heading2", "Heading3"):
+        xml = _docx_in_style(xml, style_id,
+                             lambda s: s.replace('w:after="0"', 'w:after="120"'))
+    # Lists and table cells stay left aligned: justifying a short line stretches
+    # its few words across the whole column.
+    xml = _docx_in_style(xml, "Compact",
+                         lambda s: s.replace("<w:pPr>", '<w:pPr><w:jc w:val="left" />'))
+    xml = _docx_in_style(xml, "VerbatimChar", lambda s: re.sub(
+        r'<w:sz w:val="\d+" />', '<w:sz w:val="20" />', s))
+    return xml.replace("</w:styles>", _DOCX_SOURCECODE + "</w:styles>")
+
+
+def build_docx_reference(path):
+    """Patch pandoc's own reference document into the academic look.
+
+    Patching what pandoc ships, rather than carrying a .docx in the repository,
+    keeps the styles in readable source and lets the file follow whatever
+    pandoc version is installed.
+    """
+    raw = subprocess.run(["pandoc", "--print-default-data-file", "reference.docx"],
+                         capture_output=True, timeout=30, check=True).stdout
+    src = zipfile.ZipFile(io.BytesIO(raw))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as out:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "word/styles.xml":
+                data = _docx_styles(data.decode("utf-8")).encode("utf-8")
+            elif item.filename == "word/document.xml":
+                data = data.decode("utf-8").replace(
+                    "<w:sectPr />", _DOCX_SECTPR).encode("utf-8")
+            out.writestr(item, data)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(buf.getvalue())
+    return path
+
+
+def export_env():
+    """Environment for the export subprocess, with the home TeX on PATH.
+
+    A desktop launcher never reads the shell profile, so a TeX installed under
+    the home directory is invisible to the plugin even though the same command
+    works in a terminal. TinyTeX, the usual way to get one without root, puts
+    its binaries exactly there.
+    """
+    env = dict(os.environ)
+    home = os.path.expanduser("~")
+    extra = [os.path.join(home, "bin")]
+    tex = os.path.join(home, ".TinyTeX", "bin")
+    if os.path.isdir(tex):
+        extra += [os.path.join(tex, d) for d in sorted(os.listdir(tex))]
+    path = env.get("PATH", "").split(os.pathsep)
+    env["PATH"] = os.pathsep.join(
+        [d for d in extra if os.path.isdir(d) and d not in path] + path)
+    return env
+
+
+def svg_to_png(svg, path, scale=DIAGRAM_SCALE):
+    """Rasterise an SVG string through the loader that draws the header icon.
+
+    Nothing external is involved. The obvious tool, mmdc, is packaged as a snap
+    and can read neither /mnt nor a hidden directory, so it cannot see the very
+    documents this plugin opens.
+    """
+    data = GLib.Bytes.new(svg.encode("utf-8"))
+    pixbuf = GdkPixbuf.Pixbuf.new_from_stream(
+        Gio.MemoryInputStream.new_from_bytes(data), None)
+    pixbuf = GdkPixbuf.Pixbuf.new_from_stream_at_scale(
+        Gio.MemoryInputStream.new_from_bytes(data),
+        pixbuf.get_width() * scale, pixbuf.get_height() * scale, True, None)
+    pixbuf.savev(path, "png", [], [])
+    return path
+
+
 class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
     window = GObject.Property(type=Gedit.Window)
 
@@ -681,10 +1014,23 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._syncing = False
         self._active = False
         self._busy = False
+        self._exporting = False
         self._scroll_y = 0
         self._pending_async = False
         self._level = 0
-        self._last_shown = DEFAULT_LEVEL
+        prefs = load_prefs()
+        saved = prefs.get("level")
+        self._last_shown = (saved if isinstance(saved, int) and saved in LEVELS
+                            and saved > 0 else DEFAULT_LEVEL)
+        # Applied the first time the preview opens, not now: moving the panel
+        # needs the window's widget tree, which does not exist yet.
+        saved_side = prefs.get("side")
+        self._want_side = (bool(saved_side) if isinstance(saved_side, bool)
+                           and Tepl is not None else None)
+        # A preview left open comes back open. Restoring only the share and the
+        # split is no restore from where the reader sits: the window opens on a
+        # bare editor and nothing looks remembered at all.
+        self._want_open = bool(prefs.get("open"))
         self._level_action = None
         self._button_label = None
         self._place_tries = 0
@@ -741,6 +1087,14 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         export.connect("activate", self._export)
         self.window.add_action(export)
 
+        export_docx = Gio.SimpleAction(name="markdown-preview-export-docx")
+        export_docx.connect("activate", lambda *_a: self._export(fmt="docx"))
+        self.window.add_action(export_docx)
+
+        printing = Gio.SimpleAction(name="markdown-preview-print")
+        printing.connect("activate", self._print_dialog)
+        self.window.add_action(printing)
+
         # Stateful so the popover marks the share in effect and the label can
         # follow it from a single source of truth.
         self._level_action = Gio.SimpleAction.new_stateful(
@@ -772,6 +1126,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._tab_handler = self.window.connect("active-tab-changed", self._on_tab_changed)
         self._connect_active_doc()
         self._update()
+        if self._want_open:
+            # Late enough for gedit to have restored its session documents, and
+            # harmless if the tab handler already got there first.
+            GLib.timeout_add(RESTORE_OPEN_MS, self._restore_open)
 
     def do_deactivate(self):
         if self._timeout:
@@ -810,6 +1168,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             panel.remove(self._scrolled)
         self.window.remove_action("markdown-preview")
         self.window.remove_action("markdown-preview-export")
+        self.window.remove_action("markdown-preview-export-docx")
+        self.window.remove_action("markdown-preview-print")
         self.window.remove_action("markdown-preview-level")
         self.window.remove_action("markdown-preview-edit")
         for name in ("zoom-in", "zoom-out", "zoom-reset"):
@@ -929,7 +1289,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             self._scrolled, PANEL_NAME, "Markdown Preview"
         )
         self._sync_split_button()
-        self._set_level(self._level if self._level > 0 else DEFAULT_LEVEL)
+        self._set_level(self._level if self._level > 0 else self._last_shown)
 
     def _sync_split_button(self):
         if self._split_button is None:
@@ -1046,10 +1406,35 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             self._side_paned = None
         self._busy = False
         self._sync_split_button()
+        self._remember()
         # The share means width in one orientation and height in the other, so
         # it is applied again rather than carried over.
         level, self._level = self._level, 0
-        self._set_level(level if level > 0 else DEFAULT_LEVEL)
+        self._set_level(level if level > 0 else self._last_shown)
+
+    def _remember(self):
+        save_prefs({"level": self._last_shown, "side": bool(self._side_mode),
+                    "open": self._level > 0})
+
+    def _restore_open(self, *_args):
+        """Reopen the preview if it was open when the window last closed.
+
+        Deferred rather than done while activating: gedit restores its session
+        documents after the window exists, so at activation there is often no
+        document yet to preview. Whichever comes first, the timer or the tab
+        settling, opens it and the other finds nothing left to do.
+        """
+        if not self._want_open or self._level > 0:
+            return False
+        doc = self.window.get_active_document()
+        if doc is None or not self._is_markdown(doc):
+            return False
+        self._want_open = False
+        try:
+            self._set_level(self._last_shown)
+        except Exception:  # noqa: BLE001 - a bad restore must not block gedit
+            log_error(traceback.format_exc())
+        return False
 
     def _sync_button(self, *_args):
         if self._button_label is not None:
@@ -1109,10 +1494,32 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
 
     def _set_level(self, level):
         level = min(LEVELS, key=lambda step: abs(step - int(level)))
+        # The split last in use is restored here rather than at load, because
+        # moving the panel while nothing is visible is what once left the
+        # preview in no panel at all. It sits in this method and not in the
+        # Ctrl+M path because the header-bar button opens the preview too, and
+        # a restore that only one of the two ways triggers is no restore.
+        if level > 0 and self._want_side is not None:
+            want, self._want_side = self._want_side, None
+            if want != self._side_mode:
+                try:
+                    # _set_side_mode returns here with the share applied, and by
+                    # then _want_side is already cleared, so this runs once.
+                    self._last_shown = level
+                    self._set_side_mode(want)
+                    return
+                except Exception:  # noqa: BLE001 - never open a broken layout
+                    log_error("restore split")
+                    try:
+                        self._recover_bottom()
+                    except Exception:  # noqa: BLE001
+                        log_error("restore recovery")
+                    return
         self._busy = True
         self._level = level
         if level > 0:
             self._last_shown = level
+            self._remember()
         panel = self._host_panel()
         docs = self._doc_area()
         if level == 0:
@@ -1238,6 +1645,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             self._open_block(report.get("pos", ""))
         elif kind == "commit":
             self._commit_block(report.get("pos", ""), report.get("text", ""))
+        elif kind == "export":
+            fmt = report.get("fmt", "pdf")
+            if fmt in ("pdf", "docx"):
+                self._export(fmt=fmt)
 
     def _open_block(self, pos):
         if self._doc is None or not pos:
@@ -1298,17 +1709,216 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         return False
 
     # --- export -------------------------------------------------------------
-    def _export(self, *_args):
-        # The GTK print dialog includes "Print to File", which writes the
-        # rendered page as PDF with diagrams and math already laid out. That is
-        # why export goes through printing instead of writing HTML: the bundled
-        # mermaid.js is referenced by path, so a saved HTML file would only
-        # render on this machine.
+    def _toast(self, text, state=""):
+        # Export happens outside the page, so it reports back inside it: there
+        # is no dialog, and a plugin has nowhere else to speak.
+        self._webview.run_javascript(
+            "if(window.__mdToast)window.__mdToast(%s,%s);"
+            % (json.dumps(text), json.dumps(state)), None, None, None,
+        )
+
+    def _print_dialog(self, *_args):
+        # Kept beside the typeset exports: this one prints the page as it looks
+        # on screen, which is the right answer when the point is the preview
+        # itself rather than a document to hand in.
         try:
-            op = WebKit2.PrintOperation.new(self._webview)
-            op.run_dialog(self.window)
+            WebKit2.PrintOperation.new(self._webview).run_dialog(self.window)
         except Exception:  # noqa: BLE001 - export must never break the editor
-            pass
+            log_error(traceback.format_exc())
+
+    def _export(self, _action=None, _param=None, fmt="pdf"):
+        if self._exporting:
+            self._toast("An export is already running.", "busy")
+            return
+        doc = self.window.get_active_document()
+        if doc is None or not self._is_markdown(doc):
+            self._toast("This document is not Markdown.", "err")
+            return
+        gfile = doc.get_file()
+        loc = gfile.get_location() if gfile is not None else None
+        path = loc.get_path() if loc is not None else None
+        if not path:
+            # The output goes beside the source, so there has to be a source.
+            self._toast("Save the document before exporting.", "err")
+            return
+        out = os.path.splitext(path)[0] + "." + fmt
+        start, end = doc.get_bounds()
+        text = doc.get_text(start, end, False)
+        self._exporting = True
+        self._toast("Exporting %s..." % fmt.upper(), "busy")
+        sources = ([text] if self._is_mmd(doc)
+                   else [m.group(1) for m in _MMD_FENCE.finditer(text)])
+        if sources:
+            self._render_diagrams(
+                sources,
+                lambda svgs: self._run_export(fmt, text, out, path, svgs,
+                                              self._is_mmd(doc)),
+            )
+        else:
+            self._run_export(fmt, text, out, path, [], False)
+
+    def _render_diagrams(self, sources, done):
+        """Draw the diagrams offscreen and hand back one SVG each.
+
+        The preview's own page is not scraped: its diagrams are drawn with HTML
+        labels, which live in a foreignObject that the SVG rasteriser ignores,
+        and would reach the page as empty boxes. This render turns those labels
+        into plain SVG text.
+        """
+        blocks = "".join('<pre class="mermaid">%s</pre>' % _html.escape(s)
+                         for s in sources)
+        html = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'></head><body>"
+            + blocks + '<script src="file://' + _MERMAID_JS + '"></script>'
+            "<script>if(window.mermaid){mermaid.initialize({startOnLoad:false,"
+            "securityLevel:'loose',htmlLabels:false,theme:'neutral',"
+            "flowchart:{htmlLabels:false},class:{htmlLabels:false}});"
+            "mermaid.run({nodes:document.querySelectorAll('.mermaid')})"
+            ".catch(function(){}).then(function(){window.__mdDrawn=true;});}"
+            "</script></body></html>"
+        )
+        win = Gtk.OffscreenWindow()
+        win.set_default_size(1400, 900)
+        view = WebKit2.WebView()
+        win.add(view)
+        win.show_all()
+        state = {"done": False}
+
+        def finish(svgs):
+            if state["done"]:
+                return False
+            state["done"] = True
+            win.destroy()
+            done(svgs)
+            return False
+
+        def on_grab(webview, result, _data):
+            svgs = []
+            try:
+                value = webview.run_javascript_finish(result)
+                svgs = json.loads(value.get_js_value().to_string())
+            except Exception:  # noqa: BLE001 - a diagram failure is not fatal
+                log_error(traceback.format_exc())
+            finish(svgs)
+
+        def grab():
+            view.run_javascript(
+                "JSON.stringify(Array.prototype.map.call("
+                "document.querySelectorAll('.mermaid'),function(n){"
+                "var s=n.querySelector('svg');return s?s.outerHTML:null;}));",
+                None, on_grab, None,
+            )
+            return False
+
+        def on_load(_view, event):
+            if event == WebKit2.LoadEvent.FINISHED:
+                GLib.timeout_add(DIAGRAM_WAIT_MS, grab)
+
+        view.connect("load-changed", on_load)
+        view.load_html(html, "file:///")
+        # A diagram that never finishes must not strand the export.
+        GLib.timeout_add(EXPORT_TIMEOUT * 100, lambda: finish([]))
+
+    def _substitute_diagrams(self, text, svgs, tmp, is_mmd):
+        """Swap each diagram fence for the image drawn from it.
+
+        A fence whose render failed is left as it was, so the export still runs
+        and that one diagram arrives as code instead of vanishing.
+        """
+        made = []
+        for index, svg in enumerate(svgs):
+            if not svg:
+                made.append(None)
+                continue
+            try:
+                made.append(svg_to_png(svg, os.path.join(tmp, "d%d.png" % index)))
+            except Exception:  # noqa: BLE001
+                log_error(traceback.format_exc())
+                made.append(None)
+        if is_mmd:
+            return "![](%s)\n" % made[0] if made and made[0] else text
+        counter = {"i": 0}
+
+        def swap(match):
+            index = counter["i"]
+            counter["i"] += 1
+            if index < len(made) and made[index]:
+                return "![](%s)\n" % made[index]
+            return match.group(0)
+
+        return _MMD_FENCE.sub(swap, text)
+
+    def _pandoc_command(self, fmt, out, doc_dir, reference, table_filter=""):
+        cmd = ["pandoc"] + list(EXPORT_COMMON)
+        cmd += ["--resource-path=" + doc_dir, "-o", out]
+        if table_filter:
+            cmd += ["--lua-filter=" + table_filter]
+        for name in BIB_NAMES:
+            bib = os.path.join(doc_dir, name)
+            if os.path.exists(bib):
+                cmd += ["--citeproc", "--bibliography=" + bib]
+                break
+        if fmt == "pdf":
+            cmd += list(PDF_VARS)
+        elif reference:
+            cmd += ["--reference-doc=" + reference]
+        return cmd
+
+    def _run_export(self, fmt, text, out, doc_path, svgs, is_mmd):
+        tmp = tempfile.mkdtemp(prefix="mdpreview-export-")
+        doc_dir = os.path.dirname(doc_path) or "."
+        try:
+            body = self._substitute_diagrams(text, svgs, tmp, is_mmd)
+        except Exception:  # noqa: BLE001
+            log_error(traceback.format_exc())
+            body = text
+
+        def work():
+            ok, message = False, ""
+            try:
+                reference = ""
+                if fmt == "docx":
+                    reference = os.path.join(tmp, "academic-reference.docx")
+                    build_docx_reference(reference)
+                table_filter = os.path.join(tmp, "tablewidth.lua")
+                with open(table_filter, "w", encoding="utf-8") as fh:
+                    fh.write(TABLE_WIDTH_LUA)
+                cmd = self._pandoc_command(fmt, out, doc_dir, reference, table_filter)
+                attempts = [cmd + list(PDF_FONTS), cmd] if fmt == "pdf" else [cmd]
+                env = export_env()
+                for attempt in attempts:
+                    proc = subprocess.run(attempt, input=body, capture_output=True,
+                                          text=True, timeout=EXPORT_TIMEOUT,
+                                          cwd=doc_dir, env=env)
+                    if proc.returncode == 0:
+                        ok, message = True, os.path.basename(out)
+                        break
+                    message = (proc.stderr or "").strip()
+                if not ok:
+                    log_error("export %s: %s" % (fmt, message))
+                    message = message.splitlines()[-1] if message else "pandoc failed"
+            except FileNotFoundError:
+                message = "pandoc not found. Install it: sudo apt-get install pandoc"
+            except subprocess.TimeoutExpired:
+                message = "the export went past %d s and was stopped." % EXPORT_TIMEOUT
+            except Exception as exc:  # noqa: BLE001 - never break the editor
+                log_error(traceback.format_exc())
+                message = str(exc)
+            finally:
+                shutil.rmtree(tmp, ignore_errors=True)
+            GLib.idle_add(self._export_finished, ok, fmt, message)
+
+        # pandoc with xelatex takes seconds, and the main loop draws the editor,
+        # so the run happens off it and only the report comes back.
+        threading.Thread(target=work, daemon=True).start()
+
+    def _export_finished(self, ok, fmt, message):
+        self._exporting = False
+        if ok:
+            self._toast("%s written beside the .md file: %s" % (fmt.upper(), message))
+        else:
+            self._toast("Failed to export %s: %s" % (fmt.upper(), message), "err")
+        return False
 
     # --- scroll position ----------------------------------------------------
     def _on_scroll_message(self, _ucm, result):
@@ -1358,6 +1968,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         # drop the reader in an unrelated place.
         self._scroll_y = 0
         self._connect_active_doc()
+        if self._want_open:
+            self._restore_open()
         self._update()
 
     def _connect_active_doc(self):
@@ -1540,9 +2152,17 @@ class MdPreviewAppActivatable(GObject.Object, Gedit.AppActivatable):
             )
             self._menu_ext.append_menu_item(edit)
             export = Gio.MenuItem.new(
-                "Export Markdown preview (PDF)", "win.markdown-preview-export"
+                "Export academic PDF", "win.markdown-preview-export"
             )
             self._menu_ext.append_menu_item(export)
+            export_docx = Gio.MenuItem.new(
+                "Export academic DOCX", "win.markdown-preview-export-docx"
+            )
+            self._menu_ext.append_menu_item(export_docx)
+            printing = Gio.MenuItem.new(
+                "Print the preview as it looks on screen", "win.markdown-preview-print"
+            )
+            self._menu_ext.append_menu_item(printing)
 
     def do_deactivate(self):
         self.app.set_accels_for_action("win.markdown-preview", [])
