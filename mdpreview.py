@@ -6,8 +6,10 @@
 # Apostrophe, and shows it full-view in place of the editor. Toggle with the
 # header-bar button, Ctrl+M, or the menu; the editor itself is the "raw" view.
 # Math renders offline as native MathML; ```mermaid blocks and .mmd files render
-# as diagrams via an optional local mermaid.js. The preview updates live
-# (debounced).
+# as diagrams via an optional local mermaid.js. The preview updates live (debounced) and
+# keeps the reading position across re-renders. Code blocks are syntax
+# highlighted offline by pandoc, long documents get a navigable outline, and the
+# rendered page can be exported to PDF through the print dialog.
 import gi
 gi.require_version("Gedit", "3.0")
 gi.require_version("Gtk", "3.0")
@@ -20,25 +22,79 @@ import html as _html
 
 PANEL_NAME = "MdPreviewPanel"
 DEBOUNCE_MS = 500
+# Second scroll restore, after async content (mermaid, MathML) changes the page
+# height and clamps the first one.
+RESCROLL_MS = 160
 MD_SUFFIXES = (".md", ".markdown", ".mmd", ".mdown", ".mkd")
 MMD_SUFFIXES = (".mmd",)
+# A document shorter than this many headings gets no outline.
+TOC_MIN_HEADINGS = 3
 
 # Mermaid is loaded from the plugin directory (bundled mermaid.js exposes the
 # global window.mermaid). The <script> is injected only when a diagram is
 # present, so plain Markdown stays lightweight.
 _PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 _MERMAID_JS = os.path.join(_PLUGIN_DIR, "mermaid.js")
+# Each diagram is parsed before it is rendered, and a failure replaces that one
+# diagram with its error message. Without this a malformed diagram fails
+# silently and leaves a blank area. mermaid 11 returns promises from both parse
+# and run, so async rejections are caught in the promise chain, not by try.
 MERMAID_SCRIPT = (
     '<script src="file://' + _MERMAID_JS + '"></script>'
     "<script>"
-    "if (window.mermaid) {"
-    " mermaid.initialize({ startOnLoad: false, securityLevel: 'loose',"
-    " theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'default' });"
-    " mermaid.run({ querySelector: '.mermaid' });"
-    "}"
+    "(function(){"
+    " if(!window.mermaid){return;}"
+    " var dark=window.matchMedia('(prefers-color-scheme: dark)').matches;"
+    " mermaid.initialize({startOnLoad:false,securityLevel:'loose',"
+    "theme:dark?'dark':'default'});"
+    " var nodes=document.querySelectorAll('.mermaid');"
+    " var fail=function(node,err){"
+    "  var box=document.createElement('pre');"
+    "  box.className='mmd-error';"
+    "  box.textContent='Mermaid diagram error:\\n'+"
+    "(err&&err.message?err.message:String(err));"
+    "  if(node.parentNode){node.parentNode.replaceChild(box,node);}"
+    " };"
+    " for(var i=0;i<nodes.length;i++){"
+    "  (function(node){"
+    "   var src=node.textContent;"
+    "   Promise.resolve().then(function(){return mermaid.parse(src);})"
+    "    .then(function(){return mermaid.run({nodes:[node]});})"
+    "    .catch(function(err){fail(node,err);});"
+    "  })(nodes[i]);"
+    " }"
+    "})();"
     "</script>"
 )
 _MERMAID_UNWRAP = re.compile(r'<pre class="mermaid"><code>(.*?)</code></pre>', re.S)
+
+# Injected into every page: reports the scroll position back to the plugin so a
+# re-render can restore it, and builds the outline for long documents. Plain
+# ES5 so it does not depend on the WebKit version shipped with the desktop.
+BASE_SCRIPT = (
+    "<script>"
+    "(function(){"
+    " var send=function(){try{"
+    "window.webkit.messageHandlers.mdscroll.postMessage(String(window.scrollY));"
+    "}catch(e){}};"
+    " window.addEventListener('scroll',send,{passive:true});"
+    " var hs=document.querySelectorAll('h1,h2,h3');"
+    " if(hs.length<" + str(TOC_MIN_HEADINGS) + "){return;}"
+    " var nav=document.createElement('nav');"
+    " nav.id='mdtoc';"
+    " for(var i=0;i<hs.length;i++){"
+    "  var h=hs[i];"
+    "  if(!h.id){h.id='mdh'+i;}"
+    "  var a=document.createElement('a');"
+    "  a.href='#'+h.id;"
+    "  a.textContent=h.textContent;"
+    "  a.className='lv'+h.tagName.charAt(1);"
+    "  nav.appendChild(a);"
+    " }"
+    " document.body.appendChild(nav);"
+    "})();"
+    "</script>"
+)
 
 # Apostrophe-like reading style, light and dark aware.
 CSS = """
@@ -78,11 +134,74 @@ li { margin: .2em 0; }
 table { border-collapse: collapse; margin: 1em 0; width: 100%; }
 table th, table td { border: 1px solid #ccc; padding: .4em .7em; text-align: left; }
 table th { background: #f4f4f4; }
+
+/* Diagram that failed to parse or render, shown in place of the diagram. */
+.mmd-error {
+  background: #fff4f4; border-left: 4px solid #d33; color: #8a1f1f;
+  white-space: pre-wrap; font-size: .85em;
+}
+@media (prefers-color-scheme: dark) {
+  .mmd-error { background: #2a1b1b; border-left-color: #e06c6c; color: #f0b0b0; }
+}
+
+/* Outline for long documents. Only shown when the window is wide enough that
+   it does not crowd the text column. */
+#mdtoc {
+  position: fixed; top: 2.5em; left: 1.5em; width: 14em; max-height: 80vh;
+  overflow-y: auto; font-size: .82em; line-height: 1.45; display: none;
+}
+#mdtoc a { display: block; color: #6b6b6b; text-decoration: none; padding: .1em 0; }
+#mdtoc a:hover { color: #2a76c6; text-decoration: none; }
+#mdtoc a.lv2 { padding-left: .9em; }
+#mdtoc a.lv3 { padding-left: 1.8em; }
+@media (min-width: 82em) { #mdtoc { display: block; } }
+@media (prefers-color-scheme: dark) {
+  #mdtoc a { color: #9a9a9a; }
+  #mdtoc a:hover { color: #8cb4ff; }
+}
+@media print { #mdtoc { display: none; } }
+
+/* pandoc syntax highlighting (offline, no JS). Token classes are the ones
+   pandoc emits for fenced code with a language. */
+div.sourceCode { overflow-x: auto; }
+code span.kw { color: #007020; font-weight: 700; }
+code span.cf { color: #007020; font-weight: 700; }
+code span.im { color: #007020; font-weight: 700; }
+code span.dt { color: #902000; }
+code span.dv, code span.bn, code span.fl { color: #40a070; }
+code span.ch, code span.st, code span.vs, code span.sc, code span.ss { color: #4070a0; }
+code span.co { color: #60a0b0; font-style: italic; }
+code span.do { color: #ba2121; font-style: italic; }
+code span.al, code span.er { color: #d00000; font-weight: 700; }
+code span.wa, code span.an { color: #60a0b0; font-weight: 700; font-style: italic; }
+code span.fu { color: #06287e; }
+code span.cn { color: #880000; }
+code span.va { color: #19177c; }
+code span.op { color: #666666; }
+code span.bu, code span.ex { color: #008000; }
+code span.pp { color: #bc7a00; }
+code span.at { color: #7d9029; }
+@media (prefers-color-scheme: dark) {
+  code span.kw, code span.cf, code span.im { color: #8ec07c; }
+  code span.dt { color: #fb8b5c; }
+  code span.dv, code span.bn, code span.fl { color: #b8bb26; }
+  code span.ch, code span.st, code span.vs, code span.sc, code span.ss { color: #83a598; }
+  code span.co, code span.wa, code span.an { color: #928374; }
+  code span.do { color: #fb4934; }
+  code span.al, code span.er { color: #fb4934; }
+  code span.fu { color: #83a598; }
+  code span.cn { color: #d3869b; }
+  code span.va { color: #d5c4a1; }
+  code span.op { color: #a89984; }
+  code span.bu, code span.ex { color: #b8bb26; }
+  code span.pp { color: #fabd2f; }
+  code span.at { color: #d3869b; }
+}
 """
 
 HTML_TEMPLATE = (
     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-    "<style>{css}</style></head><body>{body}{script}</body></html>"
+    "<style>{css}</style></head><body>{body}{base}{script}</body></html>"
 )
 
 
@@ -94,16 +213,18 @@ def render_body(text, is_mmd):
         return '<pre class="mermaid">\n' + _html.escape(text) + "\n</pre>"
     try:
         # gfm is GitHub-Flavored Markdown; tex_math_dollars enables $...$ and
-        # $$...$$; --mathml emits MathML that WebKitGTK renders natively, so math
-        # works offline without JS or a CDN.
+        # $$...$$; --mathml emits MathML that
+        # WebKitGTK renders natively, so math works offline without JS or a CDN.
+        # Highlighting is left on: pandoc emits token spans that the stylesheet
+        # colors, which keeps code readable without loading a JS highlighter.
         proc = subprocess.run(
-            ["pandoc", "--from=gfm+tex_math_dollars", "--to=html5", "--mathml", "--no-highlight"],
+            ["pandoc", "--from=gfm+tex_math_dollars", "--to=html5", "--mathml"],
             input=text, capture_output=True, text=True, timeout=15,
         )
         if proc.returncode != 0:
             return "<pre>pandoc error:\n" + GLib.markup_escape_text(proc.stderr) + "</pre>"
         # pandoc wraps a ```mermaid fence as <pre class="mermaid"><code>...;
-        # strip the inner <code> so mermaid.run reads the diagram source.
+        # strip the inner <code> so mermaid reads the diagram source.
         return _MERMAID_UNWRAP.sub(r'<pre class="mermaid">\1</pre>', proc.stdout)
     except FileNotFoundError:
         return "<pre>pandoc not found. Install it: sudo apt-get install pandoc</pre>"
@@ -126,15 +247,24 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._syncing = False
         self._active = False
         self._busy = False
+        self._scroll_y = 0
+        self._pending_async = False
 
     def do_activate(self):
         self._scrolled = Gtk.ScrolledWindow()
-        self._webview = WebKit2.WebView()
+        # A user content manager is needed for the page to post its scroll
+        # position back; without it the reading position is lost on every
+        # re-render, which the debounced live update makes constant.
+        ucm = WebKit2.UserContentManager()
+        ucm.register_script_message_handler("mdscroll")
+        ucm.connect("script-message-received::mdscroll", self._on_scroll_message)
+        self._webview = WebKit2.WebView.new_with_user_content_manager(ucm)
         # Allow the rendered page (loaded via load_html with a file:// base) to
         # read local image files referenced by relative or file:// paths.
         wsettings = self._webview.get_settings()
         wsettings.set_property("allow-file-access-from-file-urls", True)
         wsettings.set_property("allow-universal-access-from-file-urls", True)
+        self._webview.connect("load-changed", self._on_load_changed)
         self._scrolled.add(self._webview)
         self._scrolled.show_all()
 
@@ -147,6 +277,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         action = Gio.SimpleAction(name="markdown-preview")
         action.connect("activate", self._toggle)
         self.window.add_action(action)
+
+        export = Gio.SimpleAction(name="markdown-preview-export")
+        export.connect("activate", self._export)
+        self.window.add_action(export)
 
         self._add_headerbar_button()
         # Keep the button in sync when the panel is toggled by other means
@@ -184,6 +318,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             self._button = None
         panel.remove(self._scrolled)
         self.window.remove_action("markdown-preview")
+        self.window.remove_action("markdown-preview-export")
 
     # --- headerbar button ---------------------------------------------------
     def _search_headerbar(self, widget):
@@ -290,8 +425,59 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
     def _toggle(self, *_args):
         self._set_visible(not self._is_visible())
 
+    # --- export -------------------------------------------------------------
+    def _export(self, *_args):
+        # The GTK print dialog includes "Print to File", which writes the
+        # rendered page as PDF with diagrams and math already laid out. That is
+        # why export goes through printing instead of writing HTML: the bundled
+        # mermaid.js is referenced by path, so a saved HTML file would only
+        # render on this machine.
+        try:
+            op = WebKit2.PrintOperation.new(self._webview)
+            op.run_dialog(self.window)
+        except Exception:  # noqa: BLE001 - export must never break the editor
+            pass
+
+    # --- scroll position ----------------------------------------------------
+    def _on_scroll_message(self, _ucm, result):
+        # The page posts its scrollY on every scroll event; the last value seen
+        # is what a re-render restores.
+        try:
+            value = result.get_js_value().to_string()
+        except AttributeError:
+            try:
+                value = result.get_value().to_string()
+            except Exception:  # noqa: BLE001
+                return
+        except Exception:  # noqa: BLE001
+            return
+        try:
+            self._scroll_y = max(0, int(float(value)))
+        except (TypeError, ValueError):
+            pass
+
+    def _restore_scroll(self):
+        if self._scroll_y <= 0:
+            return False
+        self._webview.run_javascript(
+            "window.scrollTo(0,%d);" % self._scroll_y, None, None, None
+        )
+        return False
+
+    def _on_load_changed(self, _webview, event):
+        if event != WebKit2.LoadEvent.FINISHED:
+            return
+        self._restore_scroll()
+        # Mermaid and MathML change the page height after load, which clamps the
+        # first restore on a document that grows below the fold.
+        if self._pending_async:
+            GLib.timeout_add(RESCROLL_MS, self._restore_scroll)
+
     # --- document tracking --------------------------------------------------
     def _on_tab_changed(self, *_args):
+        # A different document starts at the top; keeping the old offset would
+        # drop the reader in an unrelated place.
+        self._scroll_y = 0
         self._connect_active_doc()
         self._update()
 
@@ -346,14 +532,16 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         return "file:///"
 
     def _render(self, body, script=""):
-        return HTML_TEMPLATE.format(css=CSS, body=body, script=script)
+        return HTML_TEMPLATE.format(css=CSS, body=body, base=BASE_SCRIPT, script=script)
 
     def _update(self):
         doc = self.window.get_active_document()
         if doc is None:
+            self._pending_async = False
             self._webview.load_html(self._render(""), "file:///")
             return
         if not self._is_markdown(doc):
+            self._pending_async = False
             body = "<p style='opacity:.6'>This document is not Markdown.</p>"
             self._webview.load_html(self._render(body), "file:///")
             return
@@ -362,6 +550,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         body = render_body(text, self._is_mmd(doc))
         # Load mermaid only when a diagram is actually present.
         script = MERMAID_SCRIPT if 'class="mermaid"' in body else ""
+        self._pending_async = bool(script) or "<math" in body
         self._webview.load_html(self._render(body, script), self._base_uri(doc))
 
 
@@ -376,6 +565,10 @@ class MdPreviewAppActivatable(GObject.Object, Gedit.AppActivatable):
         if self._menu_ext is not None:
             item = Gio.MenuItem.new("Markdown Preview", "win.markdown-preview")
             self._menu_ext.append_menu_item(item)
+            export = Gio.MenuItem.new(
+                "Export Markdown preview (PDF)", "win.markdown-preview-export"
+            )
+            self._menu_ext.append_menu_item(export)
 
     def do_deactivate(self):
         self.app.set_accels_for_action("win.markdown-preview", [])

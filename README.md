@@ -19,6 +19,18 @@ and formatted.
   render as figures (optional, see below).
 - **Local images**: relative and `file://` image paths load from disk.
 - **Light and dark**: the preview follows your system color scheme.
+- **Reading position kept**: the preview restores your scroll offset after each
+  re-render, so editing halfway down a long file does not throw you back to the
+  top.
+- **Syntax highlighting** in fenced code blocks, done offline by pandoc and
+  colored by the bundled stylesheet. No JavaScript highlighter, no CDN.
+- **Outline for long documents**: three or more headings produce a fixed
+  navigable index, shown only when the window is wide enough to hold it without
+  crowding the text column.
+- **Export to PDF** through the print dialog, with diagrams and math already
+  laid out.
+- **Diagram errors are visible**: a malformed Mermaid diagram shows its parse
+  error in place instead of leaving a blank area.
 
 ## Requirements
 
@@ -54,6 +66,12 @@ it via `gsettings`. It is idempotent; run it again to update.
   "Markdown Preview".
 - The preview replaces the editor while active; toggle again to return to the
   raw text.
+- On a document with three or more headings, an outline appears at the left when
+  the window is wide enough; click an entry to jump to that section.
+- To export, use the menu entry "Export Markdown preview (PDF)" and pick
+  "Print to File" in the dialog. Export prints the rendered page, which is why
+  it produces PDF rather than HTML: the bundled `mermaid.js` is referenced by
+  path, so a saved HTML file would only render on the machine that made it.
 
 Try the files under `examples/`:
 
@@ -81,6 +99,12 @@ wraps the output in a small stylesheet, and loads it into the view. When the
 preview is on, the editor area is hidden so the panel fills the window, giving a
 full-page view rather than a split. Mermaid blocks are rendered client-side by
 `mermaid.js`, loaded only when a diagram is present.
+
+Because each update reloads the page, the reading position would otherwise reset
+on every keystroke pause. The page reports its scroll offset back to the plugin
+through a WebKit script message handler, and the plugin restores that offset
+once the new content has loaded, plus once more shortly after when diagrams or
+math are present, since those change the page height asynchronously.
 
 ## Compatibility
 
