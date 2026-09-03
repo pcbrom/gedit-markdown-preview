@@ -1,60 +1,68 @@
 # gedit Markdown Preview
 
-A live Markdown preview plugin for **gedit 46**. It renders the document you are
-editing with pandoc, styled to resemble Apostrophe, and shows it in the share of
-the window you choose, from none of it to all of it. Math renders offline as
-native MathML, and Mermaid diagrams render as figures. The editor stays your raw
-view.
+A live Markdown preview for **gedit 46** that you can also write in. It renders
+the open document with pandoc, styled to resemble Apostrophe, in whatever share
+of the window you ask for, beside the editor or below it. Math renders offline as
+native MathML and Mermaid blocks render as figures. Click a block in the preview
+and you edit the Markdown that produced it, in place.
+
+Everything runs locally: no CDN, no network, no icon font.
 
 ## Features
 
-- **You choose how much of the window the preview takes**: 0%, 25%, 50%, 75% or
-  100%, from the header-bar button, whose label is always the share in effect.
-  0% is the editor alone and 100% the preview alone. The default share is 50%.
-- **Three ways to toggle**: a button in the header bar, `Ctrl+M`, or the menu
-  entry. The button reflects the current mode.
-- **Live updates** as you type (debounced).
-- **Math offline**: `$...$` and `$$...$$` render as native MathML through
-  WebKitGTK, with no JavaScript and no CDN.
+**Where the preview goes**
+
+- **You choose how much of the window it takes**: 0%, 25%, 50%, 75% or 100%, from
+  the header-bar button, whose label is always the share in effect. 0% is the
+  editor alone, 100% the preview alone, and the default is 50%.
+- **Stacked or side by side**: the button left of the share control swaps the
+  split. Stacked, the preview sits below the editor, and that is the default;
+  side by side, it moves into gedit's side panel, which the plugin reorders to
+  the right of the editor and puts back on the way out.
+- **The two views scroll together**, in both directions. Every rendered block
+  carries the source line it came from, so the match is by position in the
+  document rather than by a proportion of the total height, which is what keeps a
+  long code block from throwing the two out of step.
+- **Reading position kept** across the live re-render, so editing halfway down a
+  long file does not throw you back to the top.
+
+**What it renders**
+
+- **Math offline**: `$...$` and `$$...$$` become native MathML through WebKitGTK,
+  with no JavaScript.
 - **Mermaid diagrams**: fenced ` ```mermaid ` blocks and whole `.mmd` files
   render as figures (optional, see below).
-- **Local images**: relative and `file://` image paths load from disk.
-- **Light and dark**: the preview follows your system color scheme.
-- **Reading position kept**: the preview restores your scroll offset after each
-  re-render, so editing halfway down a long file does not throw you back to the
-  top.
-- **Syntax highlighting** in fenced code blocks, done offline by pandoc and
-  colored by the bundled stylesheet. No JavaScript highlighter, no CDN.
+- **Diagram errors are visible**: a malformed diagram shows its parse error in
+  place instead of leaving a blank area.
+- **Syntax highlighting** in fenced code blocks, done by pandoc and colored by
+  the bundled stylesheet.
+- **Local images**: relative and `file://` paths load from disk.
 - **Outline for long documents**: three or more headings produce a navigable
-  index. It adapts to the space available: a pinned side rail when the window is
-  wide enough to hold it beside the text column, and a collapsible block at the
-  top of the document when it is not, so the outline is reachable at any width.
-- **Export to PDF** through the print dialog, with diagrams and math already
-  laid out.
-- **Diagram errors are visible**: a malformed Mermaid diagram shows its parse
-  error in place instead of leaving a blank area.
-- **Edit in the render**, one block at a time. `Ctrl+E` turns edit mode on, and
-  clicking a block replaces it with the Markdown of the source lines that
-  produced it. Confirming rewrites exactly those lines and nothing else: the
-  page never converts HTML back to Markdown, so the rest of your file keeps the
-  formatting you gave it. A bar on the right carries bold, italic, heading,
-  list, code, link and table, plus confirm, cancel and exit, as Lucide icons
-  with a tooltip that says what each one does. The bar stays on screen and the
-  pencil turns edit mode on and off, so the space it takes is reserved at all
-  times and the text never runs under it. Every formatting action undoes
-  itself: apply it twice and the text is back as it was.
-- **Stacked or side by side**: a button to the left of the share control swaps
-  the split. Stacked, the preview sits below the editor and is the default;
-  side by side, it moves into gedit's side panel, which the plugin reorders to
-  the right of the editor and puts back on the way out. The share control then
-  divides width instead of height.
-- **Zoom the rendered page** with `Ctrl` and plus, minus or zero. The level is a
-  property of the view, so it survives the live re-render.
-- **The two views scroll together**, in both directions: moving the editor moves
-  the preview to the matching place, and moving the preview moves the editor.
-  Every rendered block carries the source line it came from, so the match is by
-  position in the document rather than by a proportion of the total height,
-  which is what keeps a long code block from throwing the two out of step.
+  index, a pinned side rail when the window is wide enough to hold it beside the
+  text column and a collapsible block at the top when it is not.
+- **Light and dark**: the preview follows your system color scheme.
+- **Zoom** with `Ctrl` and plus, minus or zero. The level belongs to the view, so
+  it survives the live re-render.
+
+**Writing in the preview**
+
+- **Edit one block at a time.** Clicking a block in edit mode replaces it with
+  the Markdown of the source lines that produced it. Confirming rewrites exactly
+  those lines and nothing else: the page never converts HTML back to Markdown, so
+  the rest of your file keeps the formatting you gave it, and the change lands in
+  gedit as a single undo step.
+- **A bar on the right**, always on screen, with bold, italic, heading, list,
+  code, link and table, plus confirm, cancel and the pencil that turns edit mode
+  on and off. Every formatting action undoes itself: apply it twice and the text
+  is back as it was.
+- **It refuses to write a stale range.** If the buffer changes from the editor
+  side while a block is open, the edit is dropped rather than applied to line
+  numbers that have moved.
+
+**Getting it out**
+
+- **Export to PDF** through the print dialog, with diagrams and math already laid
+  out.
 
 ## Requirements
 
@@ -69,6 +77,10 @@ On Debian/Ubuntu:
 sudo apt-get install gedit pandoc gir1.2-webkit2-4.1
 ```
 
+The side by side split additionally needs the Tepl introspection data, which
+gedit itself brings. Without it that one button is disabled and everything else
+works unchanged.
+
 ## Install
 
 ```bash
@@ -77,93 +89,110 @@ cd gedit-markdown-preview
 ./install.sh
 ```
 
-Then re-open gedit (it reads its plugin list at startup). Open a `.md` file and
-press `Ctrl+M` or click the preview button in the header bar.
+Then re-open gedit, which reads its plugin list at startup. Open a `.md` file and
+press `Ctrl+M`.
 
 The installer copies the plugin into `~/.local/share/gedit/plugins` and enables
 it via `gsettings`. It is idempotent; run it again to update.
 
 ## Usage
 
-- Open any `.md`, `.markdown`, `.mdown`, or `.mkd` file.
-- Toggle the preview with the header-bar button, `Ctrl+M`, or the menu entry
-  "Markdown Preview".
-- The header-bar button shows the share the preview holds and lists the five
-  steps; `Ctrl+M` stays a quick show and hide, returning to the share last used.
-- On a document with three or more headings, an outline is built: at the left as
-  a side rail in a wide window, or as a collapsible "Outline" block at the top
-  in a narrow one. Click an entry to jump to that section.
-- `Ctrl+E` toggles edit mode. In it, hovering outlines the block under the
-  pointer and clicking opens it for editing as Markdown; `Ctrl+Enter` or a
-  click outside confirms, `Esc` cancels. The change lands in the editor as a
-  single undo step. While a block is open the live update and the scroll sync
-  are suspended, and if the buffer changes from the editor side the open block
-  is dropped rather than written to a line range that has moved. The formatting
-  buttons act on the selection inside the open block and never take focus from
-  it, so clicking one does not close the block you are editing.
-- `Ctrl` with plus or minus zooms the rendered page in steps of ten percent,
-  between half and triple size; `Ctrl` with zero returns it to 100%. Zooming
-  changes the width available to the outline, so a large enough zoom moves it
-  from the side rail to the collapsible block.
-- To export, use the menu entry "Export Markdown preview (PDF)" and pick
-  "Print to File" in the dialog. Export prints the rendered page, which is why
-  it produces PDF rather than HTML: the bundled `mermaid.js` is referenced by
-  path, so a saved HTML file would only render on the machine that made it.
+| Action | How |
+| --- | --- |
+| Show or hide the preview | `Ctrl+M`, or the menu entry "Markdown Preview" |
+| Choose the share | the header-bar button, which lists 0%, 25%, 50%, 75%, 100% |
+| Swap stacked and side by side | the button left of the share control |
+| Turn edit mode on or off | `Ctrl+E`, the pencil in the bar, or the menu |
+| Edit a block | click it in edit mode; `Ctrl+Enter` or a click outside confirms, `Esc` cancels |
+| Zoom the page | `Ctrl` with plus, minus or zero |
+| Export | menu entry "Export Markdown preview (PDF)", then "Print to File" |
 
-Try the files under `examples/`:
+Opens any `.md`, `.markdown`, `.mdown`, `.mkd` or `.mmd` file.
 
-- `examples/math.md` for MathML rendering.
-- `examples/mermaid.md` for diagrams.
+Some details worth knowing:
+
+- `Ctrl+M` returns to the share last in use rather than to a fixed one.
+- In edit mode, hovering outlines the block under the pointer. While a block is
+  open the live update and the scroll sync are suspended, and the formatting
+  buttons never take focus from it, so clicking one does not close what you are
+  editing.
+- Clicking an outline entry jumps to that section. A large enough zoom narrows
+  the page and moves the outline from the side rail to the collapsible block.
+- Export prints the rendered page, which is why it produces PDF rather than HTML:
+  the bundled `mermaid.js` is referenced by path, so a saved HTML file would only
+  render on the machine that made it.
+
+Try the files under `examples/`: `math.md` for MathML and `mermaid.md` for
+diagrams.
 
 ## Mermaid diagrams (optional)
 
-Diagram rendering uses a local `mermaid.js` (the build that sets
-`window.mermaid`). `install.sh` provisions it automatically: it copies one from
-a local mermaid install if present, otherwise downloads it from jsDelivr.
+Diagram rendering uses a local `mermaid.js`, the build that sets
+`window.mermaid`. `install.sh` provisions it: it copies one from a local mermaid
+install if present, otherwise downloads it from jsDelivr.
 
-If `mermaid.js` is absent, everything else still works; diagram blocks simply
-show as text. To enable diagrams later, drop a `mermaid.js` at
+If `mermaid.js` is absent everything else still works and diagram blocks show as
+text. To enable diagrams later, drop a `mermaid.js` at
 `~/.local/share/gedit/plugins/mermaid.js` and re-open gedit.
 
-`mermaid.js` is not tracked in this repository (it is a large third-party file);
-it is provisioned at install time.
+`mermaid.js` is not tracked here, being a large third-party file; it is
+provisioned at install time.
 
 ## How it works
 
-The plugin adds a bottom panel holding a `WebKit2.WebView`. On each edit it runs
-the buffer through `pandoc --from=gfm+tex_math_dollars+sourcepos --to=html5
---mathml`,
-wraps the output in a small stylesheet, and loads it into the view. The chosen
-share moves the position of the paned that divides the documents area from the
-bottom panel. Showing the panel makes gedit restore its own saved height, which
-lands after a single early write, so the position is re-asserted over a few
-ticks and the requested share is the one that survives. At 100% the editor is
-hidden outright, since a paned position of zero leaves a sliver of editor and a
-drag handle in the way. Mermaid blocks are rendered client-side by `mermaid.js`,
-loaded only when a diagram is present.
+The plugin holds a `WebKit2.WebView` in one of gedit's panels. On each edit it
+runs the buffer through pandoc:
 
-Because each update reloads the page, the reading position would otherwise reset
-on every keystroke pause. The page reports its scroll offset back to the plugin
-through a WebKit script message handler, and the plugin restores that offset
-once the new content has loaded, plus once more shortly after when diagrams or
-math are present, since those change the page height asynchronously.
+```
+pandoc --from=gfm+tex_math_dollars+sourcepos --to=html5 --mathml
+```
 
-`sourcepos` also makes editing in the render safe: the block a click lands in
-names the source lines it came from, so a commit replaces that range and leaves
-the rest of the file byte for byte. The bar reserves its width with padding on
-the body rather than floating over the text, which keeps it clear of the column
-at every window size.
+wraps the output in a small stylesheet, and loads it into the view. Mermaid
+blocks are rendered client-side by `mermaid.js`, loaded only when a diagram is
+actually present.
 
-`sourcepos` is what ties the two scroll positions together: it tags every block
-with the source line it came from, and the plugin interpolates between the two
-anchors that bracket the current position. It also wraps each word in a span
-carrying its own position, which inflates the document more than tenfold and
-buys nothing for vertical scrolling, where every word on a line shares one y.
-Those inline wrappers are pruned before the page is loaded, which keeps the
-block anchors at close to the original size. Each side stops reporting for a
-moment while the other drives it, and the last position requested during that
-pause is applied when it ends, so a continuous scroll lands where it ended
-rather than where it began.
+**`sourcepos` is the keystone.** It tags every block with the source line it came
+from, which is what makes both the scroll sync and the editing exact. For
+scrolling, the plugin interpolates between the two anchors that bracket the
+current position; for editing, the block a click lands in names the line range to
+replace, so a commit rewrites that range and leaves the rest of the file byte for
+byte. The extension also wraps every word in a span carrying its own position,
+which inflates the document more than tenfold and buys nothing for vertical
+scrolling, where every word on a line shares one y. Those inline wrappers are
+pruned before the page loads, which keeps the block anchors at close to the
+original size.
+
+**Sizing.** The share sets the position of the pane that divides the editor from
+the panel, height when stacked and width when side by side. Showing the bottom
+panel makes gedit restore its own saved height, and that restore lands after a
+single early write, so the position is re-asserted over a few ticks and the
+requested share is the one that survives. At 100% the editor is hidden outright,
+since a pane position of zero leaves a sliver of editor and a drag handle in the
+way.
+
+**The side panel.** `get_side_panel()` hands back the inner panel object, but the
+widget the pane sizes is the wrapper around it, and a hidden child of a pane gets
+no width however the position is set. The wrapper is therefore what gets shown,
+found through the widget tree, and it is captured while the preview still hangs
+below it, because once the preview moves out the same walk would find the other
+side of the pane. The preview ends up at the right because the plugin reorders
+the pane's two children, and puts them back when the split returns to stacked.
+
+**Scroll sync etiquette.** Each side stops reporting for a moment while the other
+drives it, and the last position requested during that pause is applied when it
+ends, so a continuous scroll lands where it ended rather than where it began.
+
+**Failures leave a trace.** A plugin launched from the desktop has no visible
+stderr, so an error inside a callback would vanish. Failures while swapping the
+split are recorded in `~/.cache/gedit-mdpreview.log` and the preview returns to
+the bottom panel rather than ending up in no panel at all.
+
+## Icons
+
+The editing bar uses [Lucide](https://lucide.dev/) icons, ISC licensed, inlined
+as SVG. Under a kilobyte for the whole set, so the bar needs no network, no icon
+font and no second file. Since an icon carries no words, each button also carries
+a tooltip stating what the action does, and an `aria-label` with the same text.
 
 ## Compatibility
 
@@ -181,17 +210,9 @@ across releases.
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
 
-## Icons
-
-The editing bar uses [Lucide](https://lucide.dev/) icons, ISC licensed, inlined
-as SVG in the plugin. Ten shapes cost under a kilobyte, so the bar needs no
-network, no icon font and no second file. Since an icon carries no words, each
-button also carries a tooltip that states what the action does, and an
-`aria-label` with the same text.
-
 ## Credits
 
 Rendering by [pandoc](https://pandoc.org/); diagrams by
 [Mermaid](https://mermaid.js.org/); display by
-[WebKitGTK](https://webkitgtk.org/). Reading style inspired by
-[Apostrophe](https://apps.gnome.org/Apostrophe/).
+[WebKitGTK](https://webkitgtk.org/); icons by [Lucide](https://lucide.dev/).
+Reading style inspired by [Apostrophe](https://apps.gnome.org/Apostrophe/).
