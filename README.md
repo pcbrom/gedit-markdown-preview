@@ -33,6 +33,8 @@ view.
   laid out.
 - **Diagram errors are visible**: a malformed Mermaid diagram shows its parse
   error in place instead of leaving a blank area.
+- **Zoom the rendered page** with `Ctrl` and plus, minus or zero. The level is a
+  property of the view, so it survives the live re-render.
 - **The two views scroll together**, in both directions: moving the editor moves
   the preview to the matching place, and moving the preview moves the editor.
   Every rendered block carries the source line it came from, so the match is by
@@ -76,6 +78,10 @@ it via `gsettings`. It is idempotent; run it again to update.
 - On a document with three or more headings, an outline is built: at the left as
   a side rail in a wide window, or as a collapsible "Outline" block at the top
   in a narrow one. Click an entry to jump to that section.
+- `Ctrl` with plus or minus zooms the rendered page in steps of ten percent,
+  between half and triple size; `Ctrl` with zero returns it to 100%. Zooming
+  changes the width available to the outline, so a large enough zoom moves it
+  from the side rail to the collapsible block.
 - To export, use the menu entry "Export Markdown preview (PDF)" and pick
   "Print to File" in the dialog. Export prints the rendered page, which is why
   it produces PDF rather than HTML: the bundled `mermaid.js` is referenced by

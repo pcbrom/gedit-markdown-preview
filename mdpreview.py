@@ -36,6 +36,11 @@ RESCROLL_MS = 160
 # Window during which a side that was moved by the other stops reporting, so
 # the two do not chase each other.
 SYNC_UNLOCK_MS = 150
+# Zoom of the rendered page, driven by Ctrl with plus, minus and zero. The
+# WebView keeps the level across reloads, so it survives the live update.
+ZOOM_MIN = 0.5
+ZOOM_MAX = 3.0
+ZOOM_STEP = 0.1
 MD_SUFFIXES = (".md", ".markdown", ".mmd", ".mdown", ".mkd")
 MMD_SUFFIXES = (".mmd",)
 # A document shorter than this many headings gets no outline.
@@ -175,6 +180,8 @@ BASE_SCRIPT = (
     "  window.scrollTo(0,Math.max(0,interp(line,0,1)));"
     " };"
     " window.__mdQuietScroll=function(y){hush();window.scrollTo(0,y);};"
+    # Zoom relays out the page, so the plugin asks for a fresh anchor map.
+    " window.__mdRebuild=build;"
     " var send=function(){"
     "  if(quiet){return;}"
     "  try{window.webkit.messageHandlers.mdscroll.postMessage(JSON.stringify("
@@ -409,6 +416,12 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._level_action.connect("change-state", self._on_level_change)
         self.window.add_action(self._level_action)
 
+        for name, delta in (("zoom-in", ZOOM_STEP), ("zoom-out", -ZOOM_STEP),
+                            ("zoom-reset", 0.0)):
+            action = Gio.SimpleAction(name="markdown-preview-" + name)
+            action.connect("activate", self._on_zoom, delta)
+            self.window.add_action(action)
+
         self._add_headerbar_button()
         # Keep the button in sync when the panel is toggled by other means
         # (Ctrl+M, the menu item, or closing the bottom panel).
@@ -447,6 +460,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self.window.remove_action("markdown-preview")
         self.window.remove_action("markdown-preview-export")
         self.window.remove_action("markdown-preview-level")
+        for name in ("zoom-in", "zoom-out", "zoom-reset"):
+            self.window.remove_action("markdown-preview-" + name)
 
     # --- headerbar button ---------------------------------------------------
     def _search_headerbar(self, widget):
@@ -612,6 +627,23 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         # Ctrl+M and the menu entry stay a quick show/hide, returning to the
         # share last in use rather than to a fixed one.
         self._set_level(0 if self._level > 0 else self._last_shown)
+
+    # --- zoom of the rendered page ------------------------------------------
+    def _on_zoom(self, _action, _param, delta):
+        if delta:
+            level = min(ZOOM_MAX, max(ZOOM_MIN, self._webview.get_zoom_level() + delta))
+        else:
+            level = 1.0
+        self._webview.set_zoom_level(level)
+        # Zooming relays out the page, which moves every anchor the scroll sync
+        # interpolates between, so the map is rebuilt once the new layout settled.
+        GLib.timeout_add(RESCROLL_MS, self._rebuild_anchors)
+
+    def _rebuild_anchors(self):
+        self._webview.run_javascript(
+            "if(window.__mdRebuild)window.__mdRebuild();", None, None, None
+        )
+        return False
 
     # --- export -------------------------------------------------------------
     def _export(self, *_args):
@@ -812,6 +844,27 @@ class MdPreviewAppActivatable(GObject.Object, Gedit.AppActivatable):
 
     def do_activate(self):
         self.app.set_accels_for_action("win.markdown-preview", ["<Primary>m"])
+        # Plus needs shift on most layouts, and the shift stays in the modifier
+        # state that GTK matches against, so the shifted spellings are bound too;
+        # equal covers pressing the same key without shift, and the keypad has
+        # its own symbol.
+        self.app.set_accels_for_action(
+            "win.markdown-preview-zoom-in",
+            [
+                "<Primary>plus",
+                "<Primary>equal",
+                "<Primary>KP_Add",
+                "<Primary><Shift>plus",
+                "<Primary><Shift>equal",
+            ],
+        )
+        self.app.set_accels_for_action(
+            "win.markdown-preview-zoom-out",
+            ["<Primary>minus", "<Primary>KP_Subtract"],
+        )
+        self.app.set_accels_for_action(
+            "win.markdown-preview-zoom-reset", ["<Primary>0", "<Primary>KP_0"]
+        )
         # "tools-section-1" is a valid extension point in gedit 46 (used by the
         # bundled External Tools plugin); "view-menu" is not and returns None.
         self._menu_ext = self.extend_menu("tools-section-1")
@@ -825,4 +878,6 @@ class MdPreviewAppActivatable(GObject.Object, Gedit.AppActivatable):
 
     def do_deactivate(self):
         self.app.set_accels_for_action("win.markdown-preview", [])
+        for name in ("zoom-in", "zoom-out", "zoom-reset"):
+            self.app.set_accels_for_action("win.markdown-preview-" + name, [])
         self._menu_ext = None
