@@ -3,8 +3,9 @@
 #
 # Markdown Preview plugin for gedit 46 (GTK3 / Gedit-3.0 / WebKit2-4.1).
 # Renders the active Markdown document with pandoc, styled to resemble
-# Apostrophe, and shows it full-view in place of the editor. Toggle with the
-# header-bar button, Ctrl+M, or the menu; the editor itself is the "raw" view.
+# Apostrophe, in the share of the window chosen on the header-bar button. Ctrl+M
+# and the menu toggle it; the editor itself is the "raw" view, and the two scroll
+# together in both directions.
 # Math renders offline as native MathML; ```mermaid blocks and .mmd files render
 # as diagrams via an optional local mermaid.js. The preview updates live (debounced) and
 # keeps the reading position across re-renders. Code blocks are syntax
@@ -16,6 +17,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("WebKit2", "4.1")
 from gi.repository import GObject, Gedit, Gtk, Gio, GLib, WebKit2
 import subprocess
+import json
 import os
 import re
 import html as _html
@@ -31,6 +33,9 @@ DEBOUNCE_MS = 500
 # Second scroll restore, after async content (mermaid, MathML) changes the page
 # height and clamps the first one.
 RESCROLL_MS = 160
+# Window during which a side that was moved by the other stops reporting, so
+# the two do not chase each other.
+SYNC_UNLOCK_MS = 150
 MD_SUFFIXES = (".md", ".markdown", ".mmd", ".mdown", ".mkd")
 MMD_SUFFIXES = (".mmd",)
 # A document shorter than this many headings gets no outline.
@@ -72,7 +77,36 @@ MERMAID_SCRIPT = (
     "})();"
     "</script>"
 )
-_MERMAID_UNWRAP = re.compile(r'<pre class="mermaid"><code>(.*?)</code></pre>', re.S)
+# The fence keeps whatever attributes pandoc put on it (the source position among
+# them), so the diagram stays an anchor for scroll sync.
+_MERMAID_UNWRAP = re.compile(
+    r'<pre class="mermaid"(?P<attrs>[^>]*)><code[^>]*>(?P<src>.*?)</code></pre>', re.S
+)
+
+# Source positions come from pandoc's sourcepos extension, which also wraps every
+# word in a span carrying its position. Those inline wrappers inflate the document
+# by an order of magnitude and are useless for vertical scrolling, where every word
+# on a line shares one y. Pruning them keeps the block anchors and the size.
+_SPAN_TAG = re.compile(r"<span(?P<attrs>[^>]*)>|</span>")
+
+
+def strip_pos_spans(html):
+    out, stack, pos = [], [], 0
+    for match in _SPAN_TAG.finditer(html):
+        out.append(html[pos:match.start()])
+        pos = match.end()
+        if match.group(0).startswith("</"):
+            drop = stack.pop() if stack else False
+            if not drop:
+                out.append(match.group(0))
+        else:
+            attrs = match.group("attrs")
+            drop = "data-pos=" in attrs and "class=" not in attrs and "id=" not in attrs
+            stack.append(drop)
+            if not drop:
+                out.append(match.group(0))
+    out.append(html[pos:])
+    return "".join(out)
 
 # Injected into every page: reports the scroll position back to the plugin so a
 # re-render can restore it, and builds the outline for long documents. Plain
@@ -80,10 +114,7 @@ _MERMAID_UNWRAP = re.compile(r'<pre class="mermaid"><code>(.*?)</code></pre>', r
 BASE_SCRIPT = (
     "<script>"
     "(function(){"
-    " var send=function(){try{"
-    "window.webkit.messageHandlers.mdscroll.postMessage(String(window.scrollY));"
-    "}catch(e){}};"
-    " window.addEventListener('scroll',send,{passive:true});"
+    " (function(){"
     " var hs=document.querySelectorAll('h1,h2,h3');"
     " if(hs.length<" + str(TOC_MIN_HEADINGS) + "){return;}"
     " var nav=document.createElement('details');"
@@ -104,6 +135,57 @@ BASE_SCRIPT = (
     # becomes a collapsed block at the top, so it never squeezes the text.
     " nav.open=window.matchMedia('(min-width: 66em)').matches;"
     " document.body.insertBefore(nav,document.body.firstChild);"
+    " })();"
+    # Scroll sync. Every block pandoc emitted carries the source line it came
+    # from, so the two positions are tied by interpolating between the anchors
+    # that bracket the current one. The map is built after the outline is in
+    # place, since inserting it shifts every offset.
+    " var anchors=[];"
+    " var build=function(){"
+    "  anchors=[];"
+    "  var els=document.querySelectorAll('[data-pos]');"
+    "  var seen={};"
+    "  for(var i=0;i<els.length;i++){"
+    "   var ln=parseInt(els[i].getAttribute('data-pos'),10);"
+    "   if(isNaN(ln)||seen[ln]){continue;}"
+    "   seen[ln]=1;"
+    "   anchors.push([ln-1,els[i].getBoundingClientRect().top+window.scrollY]);"
+    "  }"
+    "  anchors.sort(function(a,b){return a[0]-b[0];});"
+    " };"
+    " var interp=function(v,from,to){"
+    "  if(!anchors.length){return 0;}"
+    "  if(v<=anchors[0][from]){return anchors[0][to];}"
+    "  for(var i=0;i<anchors.length-1;i++){"
+    "   var a=anchors[i],b=anchors[i+1];"
+    "   if(v>=a[from]&&v<=b[from]){"
+    "    var d=b[from]-a[from];"
+    "    return a[to]+(d?(v-a[from])/d:0)*(b[to]-a[to]);"
+    "   }"
+    "  }"
+    "  return anchors[anchors.length-1][to];"
+    " };"
+    # While the plugin drives the page, the page must not report back, or the
+    # two sides chase each other.
+    " var quiet=false;"
+    " var hush=function(){quiet=true;setTimeout(function(){quiet=false;},120);};"
+    " window.__mdGoToLine=function(line){"
+    "  if(!anchors.length){build();}"
+    "  hush();"
+    "  window.scrollTo(0,Math.max(0,interp(line,0,1)));"
+    " };"
+    " window.__mdQuietScroll=function(y){hush();window.scrollTo(0,y);};"
+    " var send=function(){"
+    "  if(quiet){return;}"
+    "  try{window.webkit.messageHandlers.mdscroll.postMessage(JSON.stringify("
+    "{y:Math.round(window.scrollY),line:Math.round(interp(window.scrollY,1,0))}));"
+    "}catch(e){}"
+    " };"
+    " window.addEventListener('scroll',send,{passive:true});"
+    " window.addEventListener('resize',build,{passive:true});"
+    " build();"
+    # Diagrams and math settle after load and move everything below them.
+    " setTimeout(build,400);"
     "})();"
     "</script>"
 )
@@ -238,15 +320,18 @@ def render_body(text, is_mmd):
         # WebKitGTK renders natively, so math works offline without JS or a CDN.
         # Highlighting is left on: pandoc emits token spans that the stylesheet
         # colors, which keeps code readable without loading a JS highlighter.
+        # sourcepos tags each block with the source line it came from, which is
+        # what ties the two scroll positions together.
         proc = subprocess.run(
-            ["pandoc", "--from=gfm+tex_math_dollars", "--to=html5", "--mathml"],
+            ["pandoc", "--from=gfm+tex_math_dollars+sourcepos", "--to=html5", "--mathml"],
             input=text, capture_output=True, text=True, timeout=15,
         )
         if proc.returncode != 0:
             return "<pre>pandoc error:\n" + GLib.markup_escape_text(proc.stderr) + "</pre>"
+        body = strip_pos_spans(proc.stdout)
         # pandoc wraps a ```mermaid fence as <pre class="mermaid"><code>...;
         # strip the inner <code> so mermaid reads the diagram source.
-        return _MERMAID_UNWRAP.sub(r'<pre class="mermaid">\1</pre>', proc.stdout)
+        return _MERMAID_UNWRAP.sub(r'<pre class="mermaid"\g<attrs>>\g<src></pre>', body)
     except FileNotFoundError:
         return "<pre>pandoc not found. Install it: sudo apt-get install pandoc</pre>"
     except Exception as exc:  # noqa: BLE001 - surface any failure in the panel
@@ -275,6 +360,12 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._level_action = None
         self._button_label = None
         self._place_tries = 0
+        self._view = None
+        self._vadj = None
+        self._vadj_handler = 0
+        self._sync_lock = False
+        self._lock_owner = None
+        self._pending_line = None
 
     def do_activate(self):
         self._scrolled = Gtk.ScrolledWindow()
@@ -440,9 +531,11 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         return self._level > 0
 
     def _place_paned(self, level):
-        # The allocation is not final while the panel is still being shown, so
-        # the position is applied once the widget reports a usable height, with
-        # a bounded number of retries instead of an open loop.
+        # The position is asserted on a few ticks rather than once: showing the
+        # panel makes gedit restore its own saved height, and that restore lands
+        # after a single early application would have run. Re-applying for a
+        # short while leaves the requested share as the one that survives, and
+        # the bounded count keeps the handle free right after.
         paned = self._paned()
         if paned is None:
             return
@@ -452,11 +545,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             total = paned.get_allocated_height()
             if total > 1:
                 paned.set_position(int(total * (100 - level) / 100.0))
-                return False
             self._place_tries += 1
-            return self._place_tries < 20
+            return self._place_tries < 6
 
-        GLib.timeout_add(50, apply_position)
+        GLib.timeout_add(100, apply_position)
 
     def _set_level(self, level):
         level = min(LEVELS, key=lambda step: abs(step - int(level)))
@@ -548,15 +640,19 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         except Exception:  # noqa: BLE001
             return
         try:
-            self._scroll_y = max(0, int(float(value)))
-        except (TypeError, ValueError):
-            pass
+            report = json.loads(value)
+            self._scroll_y = max(0, int(report.get("y", 0)))
+        except (TypeError, ValueError, AttributeError):
+            return
+        if not self._sync_lock and self._level > 0 and "line" in report:
+            self._scroll_editor_to_line(report["line"])
 
     def _restore_scroll(self):
         if self._scroll_y <= 0:
             return False
         self._webview.run_javascript(
-            "window.scrollTo(0,%d);" % self._scroll_y, None, None, None
+            "(window.__mdQuietScroll||function(y){window.scrollTo(0,y);})(%d);"
+            % self._scroll_y, None, None, None
         )
         return False
 
@@ -584,12 +680,73 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             return
         self._doc = doc
         self._doc_handler = doc.connect("changed", self._on_changed)
+        # The view is a scrollable text view, so its vertical adjustment is where
+        # the editor's own scrolling shows up.
+        view = self.window.get_active_view()
+        adj = view.get_vadjustment() if view is not None else None
+        if adj is not None:
+            self._view = view
+            self._vadj = adj
+            self._vadj_handler = adj.connect("value-changed", self._on_editor_scroll)
 
     def _disconnect_doc(self):
         if self._doc is not None and self._doc_handler:
             self._doc.disconnect(self._doc_handler)
         self._doc = None
         self._doc_handler = 0
+        if self._vadj is not None and self._vadj_handler:
+            self._vadj.disconnect(self._vadj_handler)
+        self._vadj = None
+        self._vadj_handler = 0
+        self._view = None
+
+    # --- scroll sync between editor and preview -----------------------------
+    def _hold_sync(self, owner):
+        # The owner records which side started the move, so the other side can
+        # tell a genuine scroll from the echo of its own.
+        self._sync_lock = True
+        self._lock_owner = owner
+        GLib.timeout_add(SYNC_UNLOCK_MS, self._release_sync)
+
+    def _release_sync(self):
+        self._sync_lock = False
+        owner, self._lock_owner = self._lock_owner, None
+        pending, self._pending_line = self._pending_line, None
+        # Scrolling produces a burst of events; the ones that arrive while the
+        # lock is held would otherwise be dropped and leave the preview at the
+        # position the burst started from instead of where it ended.
+        if owner == "editor" and pending is not None and self._level > 0:
+            self._push_line_to_preview(pending)
+        return False
+
+    def _push_line_to_preview(self, line):
+        self._hold_sync("editor")
+        self._webview.run_javascript(
+            "if(window.__mdGoToLine)window.__mdGoToLine(%d);" % line, None, None, None
+        )
+
+    def _on_editor_scroll(self, adj):
+        if self._level <= 0 or self._view is None:
+            return
+        if self._sync_lock and self._lock_owner == "preview":
+            return
+        found = self._view.get_line_at_y(int(adj.get_value()))
+        if not found:
+            return
+        line = found[0].get_line()
+        if self._sync_lock:
+            self._pending_line = line
+            return
+        self._push_line_to_preview(line)
+
+    def _scroll_editor_to_line(self, line):
+        if self._view is None or self._vadj is None:
+            return
+        buf = self._view.get_buffer()
+        line = max(0, min(int(line), buf.get_line_count() - 1))
+        y = self._view.get_line_yrange(buf.get_iter_at_line(line))[0]
+        self._hold_sync("preview")
+        self._vadj.set_value(y)
 
     def _on_changed(self, *_args):
         if self._timeout:
