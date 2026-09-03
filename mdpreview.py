@@ -42,6 +42,9 @@ SYNC_UNLOCK_MS = 150
 ZOOM_MIN = 0.5
 ZOOM_MAX = 3.0
 ZOOM_STEP = 0.1
+# Raster size of the header-bar icon. Larger than the nominal 16 so the
+# stroke stays crisp where the desktop scales text up.
+ICON_PX = 20
 MD_SUFFIXES = (".md", ".markdown", ".mmd", ".mdown", ".mkd")
 MMD_SUFFIXES = (".mmd",)
 # A document shorter than this many headings gets no outline.
@@ -672,6 +675,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._panel_item = None
         self._split_button = None
         self._split_image = None
+        self._ui_settings = None
+        self._side_was_visible = None
 
     def do_activate(self):
         self._scrolled = Gtk.ScrolledWindow()
@@ -769,6 +774,9 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             if self._panel_item is not None:
                 self.window.get_side_panel().remove(self._panel_item)
                 self._panel_item = None
+            if self._side_was_visible is not None:
+                self._show_side_panel(self._side_was_visible)
+                self._side_was_visible = None
         else:
             panel.remove(self._scrolled)
         self.window.remove_action("markdown-preview")
@@ -851,16 +859,17 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         color = "#777777"
         ctx = self._button.get_style_context() if self._button is not None else None
         if ctx is not None:
-            found, rgba = ctx.lookup_color("theme_fg_color")
-            if found:
-                color = "#%02x%02x%02x" % (
-                    int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255)
-                )
+            # get_color returns the foreground actually in effect. Looking up
+            # theme_fg_color can miss, and the grey fallback reads as disabled.
+            rgba = ctx.get_color(ctx.get_state())
+            color = "#%02x%02x%02x" % (
+                int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255)
+            )
         name = "columns-2" if self._side_mode else "rows-2"
         svg = (SVG_OPEN.replace('stroke="currentColor"', 'stroke="%s"' % color)
                + SPLIT_ICONS[name] + "</svg>")
         loader = GdkPixbuf.PixbufLoader.new_with_type("svg")
-        loader.set_size(16, 16)
+        loader.set_size(ICON_PX, ICON_PX)
         loader.write(svg.encode("utf-8"))
         loader.close()
         return loader.get_pixbuf()
@@ -873,6 +882,21 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             return
         self._split_image.set_from_pixbuf(self._split_pixbuf())
         self._split_button.set_tooltip_text(SPLIT_TIPS[self._side_mode])
+
+    def _ui(self):
+        # gedit keeps panel visibility in its own settings, and Tepl.Panel is an
+        # interface with no widget API, so this is the only handle on it.
+        if self._ui_settings is None:
+            try:
+                self._ui_settings = Gio.Settings.new("org.gnome.gedit.preferences.ui")
+            except Exception:  # noqa: BLE001 - schema absent means no side mode
+                self._ui_settings = False
+        return self._ui_settings or None
+
+    def _show_side_panel(self, show):
+        ui = self._ui()
+        if ui is not None:
+            ui.set_boolean("side-panel-visible", show)
 
     def _host_panel(self):
         return (self.window.get_side_panel() if self._side_mode
@@ -895,6 +919,9 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             self.window.get_bottom_panel().remove(self._scrolled)
         self._side_mode = side
         if side:
+            ui = self._ui()
+            if ui is not None and self._side_was_visible is None:
+                self._side_was_visible = ui.get_boolean("side-panel-visible")
             self._panel_item = self.window.get_side_panel().add(
                 self._scrolled, PANEL_NAME, "Markdown Preview",
                 "format-text-rich-symbolic",
@@ -903,6 +930,9 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             self.window.get_bottom_panel().add_titled(
                 self._scrolled, PANEL_NAME, "Markdown Preview"
             )
+            if self._side_was_visible is not None:
+                self._show_side_panel(self._side_was_visible)
+                self._side_was_visible = None
         self._busy = False
         self._sync_split_button()
         # The share means width in one orientation and height in the other, so
@@ -976,18 +1006,18 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             if docs is not None:
                 docs.show()
             if self._side_mode:
-                self._scrolled.hide()
-            elif hasattr(panel, "set_visible"):
+                self._show_side_panel(False)
+            else:
                 panel.set_visible(False)
         else:
             self._update()
             if self._side_mode:
+                self._scrolled.show()
                 if self._panel_item is not None:
                     panel.set_active(self._panel_item)
-                self._scrolled.show()
+                self._show_side_panel(True)
             else:
                 panel.props.visible_child = self._scrolled
-            if hasattr(panel, "set_visible"):
                 panel.set_visible(True)
             if level >= 100:
                 # Hide the editor outright: a paned position of zero would leave
