@@ -17,8 +17,18 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("WebKit2", "4.1")
 gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import GObject, Gedit, Gtk, Gio, GLib, WebKit2, GdkPixbuf
+
+# The side panel object implements both Gtk.Container and Tepl.Panel, and a plain
+# obj.add() resolves to the container method, which takes only the widget. The
+# interface methods have to be called explicitly, so Tepl has to be imported.
+try:
+    gi.require_version("Tepl", "6")
+    from gi.repository import Tepl
+except (ValueError, ImportError):  # side by side is simply unavailable
+    Tepl = None
 import subprocess
 import json
+import traceback
 import os
 import re
 import html as _html
@@ -97,6 +107,23 @@ _MERMAID_UNWRAP = re.compile(
 # by an order of magnitude and are useless for vertical scrolling, where every word
 # on a line shares one y. Pruning them keeps the block anchors and the size.
 _SPAN_TAG = re.compile(r"<span(?P<attrs>[^>]*)>|</span>")
+
+
+# A plugin launched from the desktop has no visible stderr, so a failure inside a
+# callback would vanish. Recording it gives something to read after the fact.
+ERROR_LOG = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")),
+    "gedit-mdpreview.log",
+)
+
+
+def log_error(what):
+    try:
+        os.makedirs(os.path.dirname(ERROR_LOG), exist_ok=True)
+        with open(ERROR_LOG, "a", encoding="utf-8") as fh:
+            fh.write("--- %s\n%s\n" % (what, traceback.format_exc()))
+    except Exception:  # noqa: BLE001 - logging must never raise
+        pass
 
 
 def strip_pos_spans(html):
@@ -397,7 +424,7 @@ SPLIT_ICONS = {
 }
 SPLIT_TIPS = {
     False: "Split: stacked, preview below. Click for side by side.",
-    True: "Split: side by side, preview at the left. Click for stacked.",
+    True: "Split: side by side, preview at the right. Click for stacked.",
 }
 SVG_OPEN = (
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
@@ -677,6 +704,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._split_image = None
         self._ui_settings = None
         self._side_was_visible = None
+        self._side_widget = None
+        self._side_paned = None
 
     def do_activate(self):
         self._scrolled = Gtk.ScrolledWindow()
@@ -772,7 +801,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         # The preview leaves whichever panel is hosting it.
         if self._side_mode:
             if self._panel_item is not None:
-                self.window.get_side_panel().remove(self._panel_item)
+                Tepl.Panel.remove(self.window.get_side_panel(), self._panel_item)
                 self._panel_item = None
             if self._side_was_visible is not None:
                 self._show_side_panel(self._side_was_visible)
@@ -845,7 +874,11 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         split = Gtk.Button()
         self._split_image = Gtk.Image.new_from_pixbuf(self._split_pixbuf())
         split.set_image(self._split_image)
-        split.set_tooltip_text(SPLIT_TIPS[self._side_mode])
+        split.set_tooltip_text(
+            SPLIT_TIPS[self._side_mode] if Tepl is not None
+            else "Side by side is unavailable: the Tepl library is missing."
+        )
+        split.set_sensitive(Tepl is not None)
         split.connect("clicked", self._on_split_clicked)
         split.show_all()
         headerbar.pack_end(split)
@@ -875,7 +908,28 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         return loader.get_pixbuf()
 
     def _on_split_clicked(self, *_args):
-        self._set_side_mode(not self._side_mode)
+        if Tepl is None:
+            return
+        try:
+            self._set_side_mode(not self._side_mode)
+        except Exception:  # noqa: BLE001 - a failed swap must not kill the panel
+            log_error("orientation swap")
+            # Put the preview back where it works rather than leave it nowhere.
+            try:
+                self._recover_bottom()
+            except Exception:  # noqa: BLE001
+                log_error("orientation recovery")
+
+    def _recover_bottom(self):
+        if self._scrolled.get_parent() is not None:
+            self._scrolled.get_parent().remove(self._scrolled)
+        self._side_mode = False
+        self._panel_item = None
+        self.window.get_bottom_panel().add_titled(
+            self._scrolled, PANEL_NAME, "Markdown Preview"
+        )
+        self._sync_split_button()
+        self._set_level(self._level if self._level > 0 else DEFAULT_LEVEL)
 
     def _sync_split_button(self):
         if self._split_button is None:
@@ -893,7 +947,55 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
                 self._ui_settings = False
         return self._ui_settings or None
 
-    def _show_side_panel(self, show):
+    def _side_container(self):
+        # get_side_panel() hands back the inner panel object, but the widget the
+        # pane sizes is an ancestor of it (GeditSidePanel). Showing the inner one
+        # leaves the wrapper hidden, and a hidden child of a pane gets no width
+        # however the position is set, which is why the panel stayed at a pixel.
+        node = self._scrolled.get_parent()
+        while node is not None:
+            parent = node.get_parent()
+            if (isinstance(parent, Gtk.Paned)
+                    and parent.get_orientation() == Gtk.Orientation.HORIZONTAL):
+                return node
+            node = parent
+        return None
+
+    def _swap_side(self, paned, to_right):
+        # gedit docks the side panel as the first child, which puts it at the
+        # left. Reordering the two children moves it to the right, and it is put
+        # back when the split returns to stacked, so gedit keeps its own layout.
+        first, second = paned.get_child1(), paned.get_child2()
+        if first is None or second is None:
+            return
+        side_is_first = first is self._side_widget
+        if side_is_first == (not to_right):
+            return
+        paned.remove(first)
+        paned.remove(second)
+        if to_right:
+            paned.pack1(second, True, False)
+            paned.pack2(first, False, False)
+        else:
+            paned.pack1(second, False, False)
+            paned.pack2(first, True, False)
+
+    def _show_side_panel(self, show, container=None):
+        # Two steps, and both are needed. The setting is what gedit persists, but
+        # it is read when the window is built, so writing it does not move the
+        # panel that is already on screen. The panel object is also a container,
+        # which is why showing the widget is what actually reveals it.
+        try:
+            inner = self.window.get_side_panel()
+            if hasattr(inner, "set_visible"):
+                inner.set_visible(show)
+            container = container or self._side_container()
+            if container is not None:
+                # show(), not show_all(): the wrapper is what is hidden, and its
+                # children are gedit's business.
+                container.set_visible(show)
+        except Exception:  # noqa: BLE001
+            log_error("side panel visibility")
         ui = self._ui()
         if ui is not None:
             ui.set_boolean("side-panel-visible", show)
@@ -911,9 +1013,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             docs.show()
         # Leave the current host before joining the other one.
         if self._side_mode:
-            panel = self.window.get_side_panel()
+            if self._side_paned is not None:
+                self._swap_side(self._side_paned, False)
             if self._panel_item is not None:
-                panel.remove(self._panel_item)
+                Tepl.Panel.remove(self.window.get_side_panel(), self._panel_item)
                 self._panel_item = None
         else:
             self.window.get_bottom_panel().remove(self._scrolled)
@@ -922,17 +1025,25 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             ui = self._ui()
             if ui is not None and self._side_was_visible is None:
                 self._side_was_visible = ui.get_boolean("side-panel-visible")
-            self._panel_item = self.window.get_side_panel().add(
-                self._scrolled, PANEL_NAME, "Markdown Preview",
-                "format-text-rich-symbolic",
+            self._panel_item = Tepl.Panel.add(
+                self.window.get_side_panel(), self._scrolled, PANEL_NAME,
+                "Markdown Preview", "format-text-rich-symbolic",
             )
+            # Captured while the preview still hangs below them: after it moves
+            # out, walking the tree finds the other side of the pane instead.
+            self._side_widget = self._side_container()
+            self._side_paned = self._paned()
+            if self._side_paned is not None:
+                self._swap_side(self._side_paned, True)
         else:
             self.window.get_bottom_panel().add_titled(
                 self._scrolled, PANEL_NAME, "Markdown Preview"
             )
             if self._side_was_visible is not None:
-                self._show_side_panel(self._side_was_visible)
+                self._show_side_panel(self._side_was_visible, self._side_widget)
                 self._side_was_visible = None
+            self._side_widget = None
+            self._side_paned = None
         self._busy = False
         self._sync_split_button()
         # The share means width in one orientation and height in the other, so
@@ -950,12 +1061,15 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
 
     # --- share of the window held by the preview ----------------------------
     def _paned(self):
-        # The documents area and the bottom panel are the two children of a
-        # vertical GtkPaned, and its position is what divides the window between
-        # them. child1 is the documents area.
+        # The window nests two panes: a horizontal one holding the side panel and
+        # a vertical one holding the bottom panel. Walking up to the nearest pane
+        # finds the vertical one either way, so the pane is chosen by the
+        # orientation the current split actually needs.
+        want = (Gtk.Orientation.HORIZONTAL if self._side_mode
+                else Gtk.Orientation.VERTICAL)
         node = self._scrolled.get_parent()
         while node is not None:
-            if isinstance(node, Gtk.Paned):
+            if isinstance(node, Gtk.Paned) and node.get_orientation() == want:
                 return node
             node = node.get_parent()
         return None
@@ -964,10 +1078,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         # Stacked, the documents area is the first child and the panel the
         # second; side by side the side panel comes first, so the editor is the
         # other one.
+        # With the panel moved to the right, the editor is the first child in
+        # both orientations, so the share is measured the same way in each.
         paned = self._paned()
-        if paned is None:
-            return None
-        return paned.get_child2() if self._side_mode else paned.get_child1()
+        return paned.get_child1() if paned is not None else None
 
     def _is_visible(self):
         return self._level > 0
@@ -987,8 +1101,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             total = (paned.get_allocated_width() if self._side_mode
                      else paned.get_allocated_height())
             if total > 1:
-                share = level if self._side_mode else 100 - level
-                paned.set_position(int(total * share / 100.0))
+                paned.set_position(int(total * (100 - level) / 100.0))
             self._place_tries += 1
             return self._place_tries < 6
 
@@ -1014,7 +1127,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             if self._side_mode:
                 self._scrolled.show()
                 if self._panel_item is not None:
-                    panel.set_active(self._panel_item)
+                    Tepl.Panel.set_active(panel, self._panel_item)
                 self._show_side_panel(True)
             else:
                 panel.props.visible_child = self._scrolled

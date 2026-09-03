@@ -43,8 +43,9 @@ view.
   itself: apply it twice and the text is back as it was.
 - **Stacked or side by side**: a button to the left of the share control swaps
   the split. Stacked, the preview sits below the editor and is the default;
-  side by side, it moves into gedit's side panel, which docks at the left. The
-  share control then divides width instead of height.
+  side by side, it moves into gedit's side panel, which the plugin reorders to
+  the right of the editor and puts back on the way out. The share control then
+  divides width instead of height.
 - **Zoom the rendered page** with `Ctrl` and plus, minus or zero. The level is a
   property of the view, so it survives the live re-render.
 - **The two views scroll together**, in both directions: moving the editor moves
