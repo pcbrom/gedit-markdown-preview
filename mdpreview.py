@@ -15,7 +15,8 @@ import gi
 gi.require_version("Gedit", "3.0")
 gi.require_version("Gtk", "3.0")
 gi.require_version("WebKit2", "4.1")
-from gi.repository import GObject, Gedit, Gtk, Gio, GLib, WebKit2
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GObject, Gedit, Gtk, Gio, GLib, WebKit2, GdkPixbuf
 import subprocess
 import json
 import os
@@ -385,6 +386,16 @@ ICONS = {
     "pencil": "<path d=\"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z\"/><path d=\"m15 5 4 4\"/>",
     "pencil-off": "<path d=\"m10 10-6.157 6.162a2 2 0 0 0-.5.833l-1.322 4.36a.5.5 0 0 0 .622.624l4.358-1.323a2 2 0 0 0 .83-.5L14 13.982\"/><path d=\"m12.829 7.172 4.359-4.346a1 1 0 1 1 3.986 3.986l-4.353 4.353\"/><path d=\"m15 5 4 4\"/><path d=\"m2 2 20 20\"/>"
 }
+# Shapes for the header-bar button that swaps the split. They are rasterised
+# into a pixbuf, since a header-bar button takes a widget and not markup.
+SPLIT_ICONS = {
+    "rows-2": "<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M3 12h18\"/>",
+    "columns-2": "<rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M12 3v18\"/>"
+}
+SPLIT_TIPS = {
+    False: "Split: stacked, preview below. Click for side by side.",
+    True: "Split: side by side, preview at the left. Click for stacked.",
+}
 SVG_OPEN = (
     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
     'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
@@ -657,6 +668,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._edit_pos = None
         self._edit_text = None
         self._applying_edit = False
+        self._side_mode = False
+        self._panel_item = None
+        self._split_button = None
+        self._split_image = None
 
     def do_activate(self):
         self._scrolled = Gtk.ScrolledWindow()
@@ -746,7 +761,16 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
                 self._button.disconnect(self._button_handler)
             self._button.get_parent().remove(self._button)
             self._button = None
-        panel.remove(self._scrolled)
+        if self._split_button is not None:
+            self._split_button.get_parent().remove(self._split_button)
+            self._split_button = None
+        # The preview leaves whichever panel is hosting it.
+        if self._side_mode:
+            if self._panel_item is not None:
+                self.window.get_side_panel().remove(self._panel_item)
+                self._panel_item = None
+        else:
+            panel.remove(self._scrolled)
         self.window.remove_action("markdown-preview")
         self.window.remove_action("markdown-preview-export")
         self.window.remove_action("markdown-preview-level")
@@ -807,7 +831,84 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         btn.show_all()
         headerbar.pack_end(btn)
         self._button = btn
+
+        # Packed after the level button, which puts it to the left of it:
+        # pack_end stacks inward from the right edge.
+        split = Gtk.Button()
+        self._split_image = Gtk.Image.new_from_pixbuf(self._split_pixbuf())
+        split.set_image(self._split_image)
+        split.set_tooltip_text(SPLIT_TIPS[self._side_mode])
+        split.connect("clicked", self._on_split_clicked)
+        split.show_all()
+        headerbar.pack_end(split)
+        self._split_button = split
         self._sync_button()
+
+    def _split_pixbuf(self):
+        # Lucide art is markup, and a header-bar button takes a widget, so the
+        # shape is rasterised. The stroke follows the theme foreground so the
+        # icon reads on light and on dark.
+        color = "#777777"
+        ctx = self._button.get_style_context() if self._button is not None else None
+        if ctx is not None:
+            found, rgba = ctx.lookup_color("theme_fg_color")
+            if found:
+                color = "#%02x%02x%02x" % (
+                    int(rgba.red * 255), int(rgba.green * 255), int(rgba.blue * 255)
+                )
+        name = "columns-2" if self._side_mode else "rows-2"
+        svg = (SVG_OPEN.replace('stroke="currentColor"', 'stroke="%s"' % color)
+               + SPLIT_ICONS[name] + "</svg>")
+        loader = GdkPixbuf.PixbufLoader.new_with_type("svg")
+        loader.set_size(16, 16)
+        loader.write(svg.encode("utf-8"))
+        loader.close()
+        return loader.get_pixbuf()
+
+    def _on_split_clicked(self, *_args):
+        self._set_side_mode(not self._side_mode)
+
+    def _sync_split_button(self):
+        if self._split_button is None:
+            return
+        self._split_image.set_from_pixbuf(self._split_pixbuf())
+        self._split_button.set_tooltip_text(SPLIT_TIPS[self._side_mode])
+
+    def _host_panel(self):
+        return (self.window.get_side_panel() if self._side_mode
+                else self.window.get_bottom_panel())
+
+    def _set_side_mode(self, side):
+        if side == self._side_mode:
+            return
+        self._busy = True
+        docs = self._doc_area()
+        if docs is not None:
+            docs.show()
+        # Leave the current host before joining the other one.
+        if self._side_mode:
+            panel = self.window.get_side_panel()
+            if self._panel_item is not None:
+                panel.remove(self._panel_item)
+                self._panel_item = None
+        else:
+            self.window.get_bottom_panel().remove(self._scrolled)
+        self._side_mode = side
+        if side:
+            self._panel_item = self.window.get_side_panel().add(
+                self._scrolled, PANEL_NAME, "Markdown Preview",
+                "format-text-rich-symbolic",
+            )
+        else:
+            self.window.get_bottom_panel().add_titled(
+                self._scrolled, PANEL_NAME, "Markdown Preview"
+            )
+        self._busy = False
+        self._sync_split_button()
+        # The share means width in one orientation and height in the other, so
+        # it is applied again rather than carried over.
+        level, self._level = self._level, 0
+        self._set_level(level if level > 0 else DEFAULT_LEVEL)
 
     def _sync_button(self, *_args):
         if self._button_label is not None:
@@ -830,8 +931,13 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         return None
 
     def _doc_area(self):
+        # Stacked, the documents area is the first child and the panel the
+        # second; side by side the side panel comes first, so the editor is the
+        # other one.
         paned = self._paned()
-        return paned.get_child1() if paned is not None else None
+        if paned is None:
+            return None
+        return paned.get_child2() if self._side_mode else paned.get_child1()
 
     def _is_visible(self):
         return self._level > 0
@@ -848,9 +954,11 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._place_tries = 0
 
         def apply_position():
-            total = paned.get_allocated_height()
+            total = (paned.get_allocated_width() if self._side_mode
+                     else paned.get_allocated_height())
             if total > 1:
-                paned.set_position(int(total * (100 - level) / 100.0))
+                share = level if self._side_mode else 100 - level
+                paned.set_position(int(total * share / 100.0))
             self._place_tries += 1
             return self._place_tries < 6
 
@@ -862,16 +970,25 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._level = level
         if level > 0:
             self._last_shown = level
-        panel = self.window.get_bottom_panel()
+        panel = self._host_panel()
         docs = self._doc_area()
         if level == 0:
             if docs is not None:
                 docs.show()
-            panel.set_visible(False)
+            if self._side_mode:
+                self._scrolled.hide()
+            elif hasattr(panel, "set_visible"):
+                panel.set_visible(False)
         else:
             self._update()
-            panel.props.visible_child = self._scrolled
-            panel.set_visible(True)
+            if self._side_mode:
+                if self._panel_item is not None:
+                    panel.set_active(self._panel_item)
+                self._scrolled.show()
+            else:
+                panel.props.visible_child = self._scrolled
+            if hasattr(panel, "set_visible"):
+                panel.set_visible(True)
             if level >= 100:
                 # Hide the editor outright: a paned position of zero would leave
                 # a sliver of editor and a draggable handle in the way.
@@ -894,7 +1011,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
     def _on_panel_notify(self, *_args):
         # Keep the level honest when the panel is closed or switched away by
         # other means, so the button never claims a share the preview lost.
-        if self._busy:
+        # Only the bottom panel is watched: the side panel is not a stack.
+        if self._busy or self._side_mode:
             return
         panel = self.window.get_bottom_panel()
         away = not panel.props.visible or panel.props.visible_child is not self._scrolled
