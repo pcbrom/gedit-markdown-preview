@@ -38,8 +38,9 @@ view.
   produced it. Confirming rewrites exactly those lines and nothing else: the
   page never converts HTML back to Markdown, so the rest of your file keeps the
   formatting you gave it. A bar on the right carries bold, italic, heading,
-  list, code, link and table, plus confirm, cancel and exit. Every formatting
-  action undoes itself: apply it twice and the text is back as it was.
+  list, code, link and table, plus confirm, cancel and exit, as Lucide icons
+  with a tooltip that says what each one does. Every formatting action undoes
+  itself: apply it twice and the text is back as it was.
 - **Zoom the rendered page** with `Ctrl` and plus, minus or zero. The level is a
   property of the view, so it survives the live re-render.
 - **The two views scroll together**, in both directions: moving the editor moves
@@ -172,6 +173,14 @@ across releases.
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+## Icons
+
+The editing bar uses [Lucide](https://lucide.dev/) icons, ISC licensed, inlined
+as SVG in the plugin. Ten shapes cost under a kilobyte, so the bar needs no
+network, no icon font and no second file. Since an icon carries no words, each
+button also carries a tooltip that states what the action does, and an
+`aria-label` with the same text.
 
 ## Credits
 

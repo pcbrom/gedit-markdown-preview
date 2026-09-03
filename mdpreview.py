@@ -278,26 +278,41 @@ body.mdedit [data-pos]:hover {
 }
 /* The bar reserves its width on the body instead of floating over the text, so
    it cannot cover the column at any window size. */
-body.mdedit { padding-right: 7.5em; box-shadow: inset 0 0 0 2px rgba(42,118,198,.35); }
+body.mdedit { padding-right: 3.5em; box-shadow: inset 0 0 0 2px rgba(42,118,198,.35); }
 #mdbar {
-  position: fixed; right: .7em; top: 50%; transform: translateY(-50%);
-  display: none; flex-direction: column; gap: .3em; width: 6.5em; z-index: 10;
-  max-height: 92vh; overflow-y: auto;
+  position: fixed; right: .6em; top: 50%; transform: translateY(-50%);
+  display: none; flex-direction: column; gap: .25em; width: 2.4em; z-index: 10;
 }
 body.mdedit #mdbar { display: flex; }
 #mdbar button {
-  font: inherit; font-size: .78em; padding: .45em .3em; cursor: pointer;
-  border: 1px solid #c3c3c3; border-radius: 6px; background: #fafafa; color: #2e3436;
+  position: relative; width: 2.4em; height: 2.4em; padding: 0; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid #c3c3c3; border-radius: 6px; background: #fafafa; color: #4a4a4a;
 }
+#mdbar button svg { width: 1.15em; height: 1.15em; }
 #mdbar button:hover { border-color: #2a76c6; color: #2a76c6; }
-#mdbar .mdbar-sep { height: 1px; background: #c3c3c3; margin: .25em 0; }
-#mdbar.noblock button.needs-block { opacity: .4; cursor: default; }
-#mdbar.noblock button.needs-block:hover { border-color: #c3c3c3; color: #2e3436; }
+#mdbar .mdbar-sep { height: 1px; background: #c3c3c3; margin: .3em .2em; }
+#mdbar.noblock button.needs-block { opacity: .35; cursor: default; }
+#mdbar.noblock button.needs-block:hover { border-color: #c3c3c3; color: #4a4a4a; }
+/* The tooltip is the label, since the icon carries no words. It opens to the
+   left because the bar sits against the right edge, where a native tooltip
+   would be clipped, and it appears at once instead of after the usual delay. */
+#mdbar .tip {
+  position: absolute; right: calc(100% + .5em); top: 50%;
+  transform: translateY(-50%); width: max-content; max-width: 19em;
+  background: #2e3436; color: #f5f5f5; padding: .4em .6em; border-radius: 5px;
+  font-size: .78em; line-height: 1.35; text-align: left; opacity: 0;
+  pointer-events: none; transition: opacity .1s; z-index: 20;
+}
+#mdbar button:hover .tip { opacity: 1; }
+#mdbar.noblock button.needs-block:hover .tip { opacity: 1; }
 @media (prefers-color-scheme: dark) {
   body.mdedit { box-shadow: inset 0 0 0 2px rgba(140,180,255,.35); }
-  #mdbar button { background: #2b2b2b; color: #d3d7cf; border-color: #555; }
+  #mdbar button { background: #2b2b2b; color: #b8b8b8; border-color: #555; }
   #mdbar button:hover { border-color: #8cb4ff; color: #8cb4ff; }
-  #mdbar.noblock button.needs-block:hover { border-color: #555; color: #d3d7cf; }
+  #mdbar.noblock button.needs-block:hover { border-color: #555; color: #b8b8b8; }
+  #mdbar .mdbar-sep { background: #555; }
+  #mdbar .tip { background: #101010; color: #e6e6e6; }
 }
 @media print { #mdbar { display: none !important; } }
 
@@ -353,10 +368,46 @@ code span.at { color: #7d9029; }
 # Markdown of the source lines that produced it, fetched from the plugin. The
 # page never converts HTML back to Markdown: the plugin owns the file and
 # replaces only the line range it handed out.
+# Lucide icons (ISC), taken from lucide-react 0.454.0 and inlined so the bar
+# needs no network and no second file. Ten shapes cost under a kilobyte.
+ICONS = {
+    "bold": "<path d=\"M6 12h9a4 4 0 0 1 0 8H7a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h7a4 4 0 0 1 0 8\"/>",
+    "italic": "<line x1=\"19\" x2=\"10\" y1=\"4\" y2=\"4\"/><line x1=\"14\" x2=\"5\" y1=\"20\" y2=\"20\"/><line x1=\"15\" x2=\"9\" y1=\"4\" y2=\"20\"/>",
+    "heading": "<path d=\"M6 12h12\"/><path d=\"M6 20V4\"/><path d=\"M18 20V4\"/>",
+    "list": "<path d=\"M3 12h.01\"/><path d=\"M3 18h.01\"/><path d=\"M3 6h.01\"/><path d=\"M8 12h13\"/><path d=\"M8 18h13\"/><path d=\"M8 6h13\"/>",
+    "code": "<polyline points=\"16 18 22 12 16 6\"/><polyline points=\"8 6 2 12 8 18\"/>",
+    "link": "<path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\"/><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\"/>",
+    "table": "<path d=\"M12 3v18\"/><rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M3 9h18\"/><path d=\"M3 15h18\"/>",
+    "check": "<path d=\"M20 6 9 17l-5-5\"/>",
+    "x": "<path d=\"M18 6 6 18\"/><path d=\"m6 6 12 12\"/>",
+    "pencil-off": "<path d=\"m10 10-6.157 6.162a2 2 0 0 0-.5.833l-1.322 4.36a.5.5 0 0 0 .622.624l4.358-1.323a2 2 0 0 0 .83-.5L14 13.982\"/><path d=\"m12.829 7.172 4.359-4.346a1 1 0 1 1 3.986 3.986l-4.353 4.353\"/><path d=\"m15 5 4 4\"/><path d=\"m2 2 20 20\"/>"
+}
+SVG_OPEN = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+    'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+)
+# The icon carries no words, so the tooltip is the label: it says what the
+# action does, not merely what it is called.
+TIPS = {
+    "bold": "Bold: wraps the selection in **. Apply again to undo.",
+    "italic": "Italic: wraps the selection in *. Apply again to undo.",
+    "heading": "Heading: prefixes the line with ##. Apply again to remove.",
+    "list": "List: prefixes the lines with -. Apply again to remove.",
+    "code": "Code: backticks around the selection, or a fenced block if it spans lines.",
+    "link": "Link: becomes [selection](url), with the destination already selected.",
+    "table": "Table: inserts a header, a separator and one row.",
+    "check": "Confirm (Ctrl+Enter): writes the block back to its source lines.",
+    "x": "Cancel (Esc): discards the edit.",
+    "pencil-off": "Leave edit mode (Ctrl+E)."
+}
+
 EDIT_SCRIPT = (
     "<script>"
     "(function(){"
-    " var open=null,on=false;"
+    " var ICONS=" + json.dumps(ICONS) + ";"
+    " var TIPS=" + json.dumps(TIPS) + ";"
+    " var SVG=" + json.dumps(SVG_OPEN) + ";"
+    " var open=null,on=false,bar=null;"
     " var post=function(o){try{window.webkit.messageHandlers.mdedit.postMessage("
     "JSON.stringify(o));}catch(e){}};"
     # The first ancestor carrying a position is the smallest block containing the
@@ -367,6 +418,9 @@ EDIT_SCRIPT = (
     "   node=node.parentNode;"
     "  }"
     "  return null;"
+    " };"
+    " var markOpen=function(flag){"
+    "  if(bar){bar.className=flag?'':'noblock';}"
     " };"
     " var restore=function(){"
     "  if(open&&open.box&&open.box.parentNode){"
@@ -381,13 +435,69 @@ EDIT_SCRIPT = (
     "  restore();"
     "  post(payload);"
     " };"
-    # The bar is built once and shown by the edit-mode class, so entering the
-    # mode costs nothing beyond a class change.
-    " var bar=null,barEl={};"
-    " var mkbtn=function(label,cls,fn){"
+    " var setv=function(v,a,b){"
+    "  var box=open.box;box.value=v;box.focus();box.setSelectionRange(a,b);"
+    " };"
+    " var wrap=function(mark){"
+    "  if(!open){return;}"
+    "  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;"
+    "  var m=mark.length,sel=v.slice(a,b),pre=v.slice(0,a),post2=v.slice(b);"
+    "  if(pre.slice(-m)===mark&&post2.slice(0,m)===mark){"
+    "   setv(pre.slice(0,-m)+sel+post2.slice(m),a-m,b-m);"
+    "  }else if(sel.length>=2*m&&sel.slice(0,m)===mark&&sel.slice(-m)===mark){"
+    "   setv(pre+sel.slice(m,-m)+post2,a,b-2*m);"
+    "  }else{"
+    "   setv(pre+mark+sel+mark+post2,a+m,b+m);"
+    "  }"
+    " };"
+    # Line prefixes act on every line the selection touches, and applying the
+    # same prefix again removes it, so a mistaken click is undone by repeating it.
+    " var linepre=function(re,pre){"
+    "  if(!open){return;}"
+    "  var box=open.box,v=box.value;"
+    "  var a=v.lastIndexOf('\\n',box.selectionStart-1)+1;"
+    "  var e=v.indexOf('\\n',box.selectionEnd);"
+    "  if(e<0){e=v.length;}"
+    "  var body=v.slice(a,e).split('\\n');"
+    "  var off=body.every(function(l){return re.test(l);});"
+    "  body=body.map(function(l){return off?l.replace(re,''):pre+l;});"
+    "  var out=body.join('\\n');"
+    "  setv(v.slice(0,a)+out+v.slice(e),a,a+out.length);"
+    " };"
+    " var insert=function(text,back){"
+    "  if(!open){return;}"
+    "  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;"
+    "  var out=v.slice(0,a)+text+v.slice(b);"
+    "  var c=a+text.length-(back||0);"
+    "  setv(out,c,c);"
+    " };"
+    " var link=function(){"
+    "  if(!open){return;}"
+    "  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;"
+    "  var sel=v.slice(a,b)||'text';"
+    "  var out=v.slice(0,a)+'['+sel+'](url)'+v.slice(b);"
+    "  var u=a+sel.length+3;"
+    "  setv(out,u,u+3);"
+    " };"
+    " var code=function(){"
+    "  if(!open){return;}"
+    "  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;"
+    "  var sel=v.slice(a,b);"
+    "  if(sel.indexOf('\\n')<0&&sel!==''){wrap('`');return;}"
+    "  insert('```\\n'+sel+'\\n```\\n',sel.length+5);"
+    " };"
+    # Preventing the default on mousedown keeps the focus in the open block: a
+    # blur would commit it, so a formatting click would close what it was meant
+    # to format.
+    " var mkbtn=function(id,cls,fn){"
     "  var b=document.createElement('button');"
-    "  b.textContent=label;"
     "  if(cls){b.className=cls;}"
+    "  b.setAttribute('aria-label',TIPS[id]);"
+    "  b.innerHTML=SVG+ICONS[id]+'</svg>';"
+    "  var tip=document.createElement('span');"
+    "  tip.className='tip';"
+    "  tip.textContent=TIPS[id];"
+    "  b.appendChild(tip);"
     "  b.addEventListener('mousedown',function(ev){ev.preventDefault();});"
     "  b.addEventListener('click',function(ev){ev.preventDefault();fn();});"
     "  return b;"
@@ -396,36 +506,29 @@ EDIT_SCRIPT = (
     "  bar=document.createElement('div');"
     "  bar.id='mdbar';"
     "  bar.className='noblock';"
-    "  var fmt=["
-    "   ['Bold','needs-block',function(){wrap('**');}],"
-    "   ['Italic','needs-block',function(){wrap('*');}],"
-    "   ['Heading','needs-block',function(){linepre(/^#{1,6} /,'## ');}],"
-    "   ['List','needs-block',function(){linepre(/^[-*] /,'- ');}],"
-    "   ['Code','needs-block',code],"
-    "   ['Link','needs-block',link],"
-    "   ['Table','needs-block',function(){"
+    "  var items=["
+    "   ['bold','needs-block',function(){wrap('**');}],"
+    "   ['italic','needs-block',function(){wrap('*');}],"
+    "   ['heading','needs-block',function(){linepre(/^#{1,6} /,'## ');}],"
+    "   ['list','needs-block',function(){linepre(/^[-*] /,'- ');}],"
+    "   ['code','needs-block',code],"
+    "   ['link','needs-block',link],"
+    "   ['table','needs-block',function(){"
     "    insert('| a | b |\\n| --- | --- |\\n| 1 | 2 |\\n',0);"
     "   }]"
     "  ];"
-    "  for(var i=0;i<fmt.length;i++){"
-    "   bar.appendChild(mkbtn(fmt[i][0],fmt[i][1],fmt[i][2]));"
+    "  for(var i=0;i<items.length;i++){"
+    "   bar.appendChild(mkbtn(items[i][0],items[i][1],items[i][2]));"
     "  }"
     "  var sep=document.createElement('div');"
     "  sep.className='mdbar-sep';"
     "  bar.appendChild(sep);"
-    "  barEl.ok=mkbtn('Confirm','needs-block',function(){commit();});"
-    "  barEl.no=mkbtn('Cancel','needs-block',function(){"
-    "   restore();post({kind:'cancel'});markOpen(false);"
-    "  });"
-    "  barEl.out=mkbtn('Exit','',function(){post({kind:'exit'});});"
-    "  bar.appendChild(barEl.ok);"
-    "  bar.appendChild(barEl.no);"
-    "  bar.appendChild(barEl.out);"
+    "  bar.appendChild(mkbtn('check','needs-block',function(){commit();}));"
+    "  bar.appendChild(mkbtn('x','needs-block',function(){"
+    "   restore();post({kind:'cancel'});"
+    "  }));"
+    "  bar.appendChild(mkbtn('pencil-off','',function(){post({kind:'exit'});}));"
     "  document.body.appendChild(bar);"
-    " };"
-    " var setv=function(v,a,b){  var box=open.box;box.value=v;box.focus();box.setSelectionRange(a,b); }; var wrap=function(mark){  if(!open){return;}  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;  var m=mark.length,sel=v.slice(a,b),pre=v.slice(0,a),post=v.slice(b);  if(pre.slice(-m)===mark&&post.slice(0,m)===mark){   setv(pre.slice(0,-m)+sel+post.slice(m),a-m,b-m);  }else if(sel.length>=2*m&&sel.slice(0,m)===mark&&sel.slice(-m)===mark){   setv(pre+sel.slice(m,-m)+post,a,b-2*m);  }else{   setv(pre+mark+sel+mark+post,a+m,b+m);  } }; var linepre=function(re,pre){  if(!open){return;}  var box=open.box,v=box.value;  var a=v.lastIndexOf('\\n',box.selectionStart-1)+1;  var e=v.indexOf('\\n',box.selectionEnd);  if(e<0){e=v.length;}  var body=v.slice(a,e).split('\\n');  var off=body.every(function(l){return re.test(l);});  body=body.map(function(l){return off?l.replace(re,''):pre+l;});  var out=body.join('\\n');  setv(v.slice(0,a)+out+v.slice(e),a,a+out.length); }; var insert=function(text,back){  if(!open){return;}  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;  var out=v.slice(0,a)+text+v.slice(b);  var c=a+text.length-(back||0);  setv(out,c,c); }; var link=function(){  if(!open){return;}  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;  var sel=v.slice(a,b)||'text';  var out=v.slice(0,a)+'['+sel+'](url)'+v.slice(b);  var u=a+sel.length+3;  setv(out,u,u+3); }; var code=function(){  if(!open){return;}  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;  var sel=v.slice(a,b);  if(sel.indexOf('\\n')<0&&sel!==''){wrap('`');return;}  insert('```\\n'+sel+'\\n```\\n',sel.length+5); };"
-    " var markOpen=function(flag){"
-    "  if(bar){bar.className=flag?'':'noblock';}"
     " };"
     " window.__mdSetEdit=function(flag){"
     "  on=!!flag;"
@@ -467,6 +570,7 @@ EDIT_SCRIPT = (
     "})();"
     "</script>"
 )
+
 
 HTML_TEMPLATE = (
     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
