@@ -37,7 +37,9 @@ view.
   clicking a block replaces it with the Markdown of the source lines that
   produced it. Confirming rewrites exactly those lines and nothing else: the
   page never converts HTML back to Markdown, so the rest of your file keeps the
-  formatting you gave it. A bar on the right carries confirm, cancel and exit.
+  formatting you gave it. A bar on the right carries bold, italic, heading,
+  list, code, link and table, plus confirm, cancel and exit. Every formatting
+  action undoes itself: apply it twice and the text is back as it was.
 - **Zoom the rendered page** with `Ctrl` and plus, minus or zero. The level is a
   property of the view, so it survives the live re-render.
 - **The two views scroll together**, in both directions: moving the editor moves
@@ -88,7 +90,9 @@ it via `gsettings`. It is idempotent; run it again to update.
   click outside confirms, `Esc` cancels. The change lands in the editor as a
   single undo step. While a block is open the live update and the scroll sync
   are suspended, and if the buffer changes from the editor side the open block
-  is dropped rather than written to a line range that has moved.
+  is dropped rather than written to a line range that has moved. The formatting
+  buttons act on the selection inside the open block and never take focus from
+  it, so clicking one does not close the block you are editing.
 - `Ctrl` with plus or minus zooms the rendered page in steps of ten percent,
   between half and triple size; `Ctrl` with zero returns it to 100%. Zooming
   changes the width available to the outline, so a large enough zoom moves it

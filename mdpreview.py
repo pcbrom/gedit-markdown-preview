@@ -278,10 +278,11 @@ body.mdedit [data-pos]:hover {
 }
 /* The bar reserves its width on the body instead of floating over the text, so
    it cannot cover the column at any window size. */
-body.mdedit { padding-right: 6em; box-shadow: inset 0 0 0 2px rgba(42,118,198,.35); }
+body.mdedit { padding-right: 7.5em; box-shadow: inset 0 0 0 2px rgba(42,118,198,.35); }
 #mdbar {
   position: fixed; right: .7em; top: 50%; transform: translateY(-50%);
-  display: none; flex-direction: column; gap: .4em; width: 5em; z-index: 10;
+  display: none; flex-direction: column; gap: .3em; width: 6.5em; z-index: 10;
+  max-height: 92vh; overflow-y: auto;
 }
 body.mdedit #mdbar { display: flex; }
 #mdbar button {
@@ -289,6 +290,7 @@ body.mdedit #mdbar { display: flex; }
   border: 1px solid #c3c3c3; border-radius: 6px; background: #fafafa; color: #2e3436;
 }
 #mdbar button:hover { border-color: #2a76c6; color: #2a76c6; }
+#mdbar .mdbar-sep { height: 1px; background: #c3c3c3; margin: .25em 0; }
 #mdbar.noblock button.needs-block { opacity: .4; cursor: default; }
 #mdbar.noblock button.needs-block:hover { border-color: #c3c3c3; color: #2e3436; }
 @media (prefers-color-scheme: dark) {
@@ -394,6 +396,23 @@ EDIT_SCRIPT = (
     "  bar=document.createElement('div');"
     "  bar.id='mdbar';"
     "  bar.className='noblock';"
+    "  var fmt=["
+    "   ['Bold','needs-block',function(){wrap('**');}],"
+    "   ['Italic','needs-block',function(){wrap('*');}],"
+    "   ['Heading','needs-block',function(){linepre(/^#{1,6} /,'## ');}],"
+    "   ['List','needs-block',function(){linepre(/^[-*] /,'- ');}],"
+    "   ['Code','needs-block',code],"
+    "   ['Link','needs-block',link],"
+    "   ['Table','needs-block',function(){"
+    "    insert('| a | b |\\n| --- | --- |\\n| 1 | 2 |\\n',0);"
+    "   }]"
+    "  ];"
+    "  for(var i=0;i<fmt.length;i++){"
+    "   bar.appendChild(mkbtn(fmt[i][0],fmt[i][1],fmt[i][2]));"
+    "  }"
+    "  var sep=document.createElement('div');"
+    "  sep.className='mdbar-sep';"
+    "  bar.appendChild(sep);"
     "  barEl.ok=mkbtn('Confirm','needs-block',function(){commit();});"
     "  barEl.no=mkbtn('Cancel','needs-block',function(){"
     "   restore();post({kind:'cancel'});markOpen(false);"
@@ -404,6 +423,7 @@ EDIT_SCRIPT = (
     "  bar.appendChild(barEl.out);"
     "  document.body.appendChild(bar);"
     " };"
+    " var setv=function(v,a,b){  var box=open.box;box.value=v;box.focus();box.setSelectionRange(a,b); }; var wrap=function(mark){  if(!open){return;}  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;  var m=mark.length,sel=v.slice(a,b),pre=v.slice(0,a),post=v.slice(b);  if(pre.slice(-m)===mark&&post.slice(0,m)===mark){   setv(pre.slice(0,-m)+sel+post.slice(m),a-m,b-m);  }else if(sel.length>=2*m&&sel.slice(0,m)===mark&&sel.slice(-m)===mark){   setv(pre+sel.slice(m,-m)+post,a,b-2*m);  }else{   setv(pre+mark+sel+mark+post,a+m,b+m);  } }; var linepre=function(re,pre){  if(!open){return;}  var box=open.box,v=box.value;  var a=v.lastIndexOf('\\n',box.selectionStart-1)+1;  var e=v.indexOf('\\n',box.selectionEnd);  if(e<0){e=v.length;}  var body=v.slice(a,e).split('\\n');  var off=body.every(function(l){return re.test(l);});  body=body.map(function(l){return off?l.replace(re,''):pre+l;});  var out=body.join('\\n');  setv(v.slice(0,a)+out+v.slice(e),a,a+out.length); }; var insert=function(text,back){  if(!open){return;}  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;  var out=v.slice(0,a)+text+v.slice(b);  var c=a+text.length-(back||0);  setv(out,c,c); }; var link=function(){  if(!open){return;}  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;  var sel=v.slice(a,b)||'text';  var out=v.slice(0,a)+'['+sel+'](url)'+v.slice(b);  var u=a+sel.length+3;  setv(out,u,u+3); }; var code=function(){  if(!open){return;}  var box=open.box,a=box.selectionStart,b=box.selectionEnd,v=box.value;  var sel=v.slice(a,b);  if(sel.indexOf('\\n')<0&&sel!==''){wrap('`');return;}  insert('```\\n'+sel+'\\n```\\n',sel.length+5); };"
     " var markOpen=function(flag){"
     "  if(bar){bar.className=flag?'':'noblock';}"
     " };"
