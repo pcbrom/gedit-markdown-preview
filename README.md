@@ -33,6 +33,11 @@ view.
   laid out.
 - **Diagram errors are visible**: a malformed Mermaid diagram shows its parse
   error in place instead of leaving a blank area.
+- **The two views scroll together**, in both directions: moving the editor moves
+  the preview to the matching place, and moving the preview moves the editor.
+  Every rendered block carries the source line it came from, so the match is by
+  position in the document rather than by a proportion of the total height,
+  which is what keeps a long code block from throwing the two out of step.
 
 ## Requirements
 
@@ -97,7 +102,8 @@ it is provisioned at install time.
 ## How it works
 
 The plugin adds a bottom panel holding a `WebKit2.WebView`. On each edit it runs
-the buffer through `pandoc --from=gfm+tex_math_dollars --to=html5 --mathml`,
+the buffer through `pandoc --from=gfm+tex_math_dollars+sourcepos --to=html5
+--mathml`,
 wraps the output in a small stylesheet, and loads it into the view. The chosen
 share moves the position of the paned that divides the documents area from the
 bottom panel. Showing the panel makes gedit restore its own saved height, which
@@ -112,6 +118,17 @@ on every keystroke pause. The page reports its scroll offset back to the plugin
 through a WebKit script message handler, and the plugin restores that offset
 once the new content has loaded, plus once more shortly after when diagrams or
 math are present, since those change the page height asynchronously.
+
+`sourcepos` is what ties the two scroll positions together: it tags every block
+with the source line it came from, and the plugin interpolates between the two
+anchors that bracket the current position. It also wraps each word in a span
+carrying its own position, which inflates the document more than tenfold and
+buys nothing for vertical scrolling, where every word on a line shares one y.
+Those inline wrappers are pruned before the page is loaded, which keeps the
+block anchors at close to the original size. Each side stops reporting for a
+moment while the other drives it, and the last position requested during that
+pause is applied when it ends, so a continuous scroll lands where it ended
+rather than where it began.
 
 ## Compatibility
 
