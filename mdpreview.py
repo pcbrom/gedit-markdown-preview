@@ -21,10 +21,12 @@ import re
 import html as _html
 
 PANEL_NAME = "MdPreviewPanel"
-# Full view hides the editor so the preview fills the window; split keeps both
-# visible. Split is what live editing wants, since the buffer can only change
-# while the editor is reachable, and it is the mode the scroll restore serves.
-FULL_VIEW = True
+# How much of the window the preview holds, in percent: 0 is the editor alone,
+# 100 the preview alone, and the values between split the window. The header-bar
+# button offers these steps and its label shows the one in effect. The default is
+# the share a preview opens at, not a share forced at startup.
+LEVELS = (0, 25, 50, 75, 100)
+DEFAULT_LEVEL = 50
 DEBOUNCE_MS = 500
 # Second scroll restore, after async content (mermaid, MathML) changes the page
 # height and clamps the first one.
@@ -268,6 +270,11 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._busy = False
         self._scroll_y = 0
         self._pending_async = False
+        self._level = 0
+        self._last_shown = DEFAULT_LEVEL
+        self._level_action = None
+        self._button_label = None
+        self._place_tries = 0
 
     def do_activate(self):
         self._scrolled = Gtk.ScrolledWindow()
@@ -300,6 +307,16 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         export = Gio.SimpleAction(name="markdown-preview-export")
         export.connect("activate", self._export)
         self.window.add_action(export)
+
+        # Stateful so the popover marks the share in effect and the label can
+        # follow it from a single source of truth.
+        self._level_action = Gio.SimpleAction.new_stateful(
+            "markdown-preview-level",
+            GLib.VariantType.new("i"),
+            GLib.Variant.new_int32(self._level),
+        )
+        self._level_action.connect("change-state", self._on_level_change)
+        self.window.add_action(self._level_action)
 
         self._add_headerbar_button()
         # Keep the button in sync when the panel is toggled by other means
@@ -338,6 +355,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         panel.remove(self._scrolled)
         self.window.remove_action("markdown-preview")
         self.window.remove_action("markdown-preview-export")
+        self.window.remove_action("markdown-preview-level")
 
     # --- headerbar button ---------------------------------------------------
     def _search_headerbar(self, widget):
@@ -373,82 +391,135 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         headerbar = self._find_headerbar()
         if headerbar is None:
             return
-        btn = Gtk.ToggleButton()
-        btn.set_image(Gtk.Image.new_from_icon_name("format-text-rich-symbolic", Gtk.IconSize.BUTTON))
-        btn.set_tooltip_text("Toggle Markdown preview (Ctrl+M)")
+        # A menu button rather than a toggle: the five shares are listed in the
+        # popover and the label always shows the one in effect, so the control
+        # says how much of the window the preview holds, not merely whether it
+        # is on.
+        btn = Gtk.MenuButton()
+        self._button_label = Gtk.Label(label="%d%%" % self._level)
+        btn.add(self._button_label)
+        menu = Gio.Menu()
+        for level in LEVELS:
+            item = Gio.MenuItem.new("%d%%" % level, None)
+            item.set_action_and_target_value(
+                "win.markdown-preview-level", GLib.Variant.new_int32(level)
+            )
+            menu.append_item(item)
+        btn.set_menu_model(menu)
+        btn.set_tooltip_text("How much of the window the preview holds (Ctrl+M toggles)")
         btn.show_all()
         headerbar.pack_end(btn)
-        self._button_handler = btn.connect("toggled", self._on_button_toggled)
         self._button = btn
         self._sync_button()
 
-    def _on_button_toggled(self, btn):
-        if self._syncing:
-            return
-        self._set_visible(btn.get_active())
-
     def _sync_button(self, *_args):
-        if self._button is None:
-            return
-        self._syncing = True
-        self._button.set_active(self._is_visible())
-        self._syncing = False
+        if self._button_label is not None:
+            self._button_label.set_text("%d%%" % self._level)
+        if self._level_action is not None:
+            self._syncing = True
+            self._level_action.set_state(GLib.Variant.new_int32(self._level))
+            self._syncing = False
 
-    # --- toggling (full-view mode: preview replaces the editor) -------------
-    def _doc_area(self):
-        # The documents area is child1 of the vertical GtkPaned whose child2
-        # holds the bottom panel. Hiding it lets the panel fill the whole area,
-        # so the preview reads as a full page rather than a split.
+    # --- share of the window held by the preview ----------------------------
+    def _paned(self):
+        # The documents area and the bottom panel are the two children of a
+        # vertical GtkPaned, and its position is what divides the window between
+        # them. child1 is the documents area.
         node = self._scrolled.get_parent()
         while node is not None:
             if isinstance(node, Gtk.Paned):
-                return node.get_child1()
+                return node
             node = node.get_parent()
         return None
 
-    def _is_visible(self):
-        return self._active
+    def _doc_area(self):
+        paned = self._paned()
+        return paned.get_child1() if paned is not None else None
 
-    def _set_visible(self, show):
+    def _is_visible(self):
+        return self._level > 0
+
+    def _place_paned(self, level):
+        # The allocation is not final while the panel is still being shown, so
+        # the position is applied once the widget reports a usable height, with
+        # a bounded number of retries instead of an open loop.
+        paned = self._paned()
+        if paned is None:
+            return
+        self._place_tries = 0
+
+        def apply_position():
+            total = paned.get_allocated_height()
+            if total > 1:
+                paned.set_position(int(total * (100 - level) / 100.0))
+                return False
+            self._place_tries += 1
+            return self._place_tries < 20
+
+        GLib.timeout_add(50, apply_position)
+
+    def _set_level(self, level):
+        level = min(LEVELS, key=lambda step: abs(step - int(level)))
         self._busy = True
+        self._level = level
+        if level > 0:
+            self._last_shown = level
         panel = self.window.get_bottom_panel()
         docs = self._doc_area()
-        if show:
-            self._update()
-            panel.props.visible_child = self._scrolled
-            panel.set_visible(True)
-            if FULL_VIEW and docs is not None:
-                docs.hide()
-        else:
+        if level == 0:
             if docs is not None:
                 docs.show()
             panel.set_visible(False)
-        self._active = show
+        else:
+            self._update()
+            panel.props.visible_child = self._scrolled
+            panel.set_visible(True)
+            if level >= 100:
+                # Hide the editor outright: a paned position of zero would leave
+                # a sliver of editor and a draggable handle in the way.
+                if docs is not None:
+                    docs.hide()
+            else:
+                if docs is not None:
+                    docs.show()
+                self._place_paned(level)
+        self._active = level > 0
         self._busy = False
         self._sync_button()
 
+    def _on_level_change(self, action, value):
+        action.set_state(value)
+        if self._syncing:
+            return
+        self._set_level(value.get_int32())
+
     def _on_panel_notify(self, *_args):
-        # If the panel is closed or switched away while the preview is full,
-        # restore the editor so the user is never left on a blank area.
+        # Keep the level honest when the panel is closed or switched away by
+        # other means, so the button never claims a share the preview lost.
         if self._busy:
             return
         panel = self.window.get_bottom_panel()
         away = not panel.props.visible or panel.props.visible_child is not self._scrolled
-        if self._active and away:
+        if self._level > 0 and away:
             docs = self._doc_area()
             if docs is not None:
                 docs.show()
+            self._level = 0
             self._active = False
-        elif not self._active and not away:
-            # The panel was opened by other means (its own tab, the View menu).
-            # Adopt it, so the header-bar button reflects what is on screen and
-            # the preview is refreshed for the current document.
+        elif self._level == 0 and not away:
+            # Opened by other means (its own tab, the View menu): adopt it at the
+            # share last in use.
+            self._level = self._last_shown
             self._active = True
             self._update()
+            if self._level < 100:
+                self._place_paned(self._level)
         self._sync_button()
 
     def _toggle(self, *_args):
-        self._set_visible(not self._is_visible())
+        # Ctrl+M and the menu entry stay a quick show/hide, returning to the
+        # share last in use rather than to a fixed one.
+        self._set_level(0 if self._level > 0 else self._last_shown)
 
     # --- export -------------------------------------------------------------
     def _export(self, *_args):
