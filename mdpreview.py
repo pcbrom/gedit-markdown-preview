@@ -271,6 +271,21 @@ table th { background: #f4f4f4; }
 }
 @media print { #mdtoc { display: none; } }
 
+/* Edit mode. Only in this mode is a block clickable, so an ordinary reading
+   click never turns into an edit. */
+body.mdedit [data-pos]:hover {
+  outline: 2px dashed #2a76c6; outline-offset: 3px; cursor: text;
+}
+textarea.mdedit-box {
+  width: 100%; box-sizing: border-box; font-family: "Source Code Pro", monospace;
+  font-size: .92em; line-height: 1.5; padding: .6em .8em; border: 2px solid #2a76c6;
+  border-radius: 6px; background: #fff; color: #2e3436; resize: vertical;
+}
+@media (prefers-color-scheme: dark) {
+  textarea.mdedit-box { background: #1b1b1b; color: #d3d7cf; border-color: #8cb4ff; }
+  body.mdedit [data-pos]:hover { outline-color: #8cb4ff; }
+}
+
 /* pandoc syntax highlighting (offline, no JS). Token classes are the ones
    pandoc emits for fenced code with a language. */
 div.sourceCode { overflow-x: auto; }
@@ -309,9 +324,78 @@ code span.at { color: #7d9029; }
 }
 """
 
+# Editing happens on the block the click landed in, and the text it shows is the
+# Markdown of the source lines that produced it, fetched from the plugin. The
+# page never converts HTML back to Markdown: the plugin owns the file and
+# replaces only the line range it handed out.
+EDIT_SCRIPT = (
+    "<script>"
+    "(function(){"
+    " var open=null,on=false;"
+    " var post=function(o){try{window.webkit.messageHandlers.mdedit.postMessage("
+    "JSON.stringify(o));}catch(e){}};"
+    # The first ancestor carrying a position is the smallest block containing the
+    # click, which is what makes a list item win over the list around it.
+    " var blockAt=function(node){"
+    "  while(node&&node!==document.body){"
+    "   if(node.getAttribute&&node.getAttribute('data-pos')){return node;}"
+    "   node=node.parentNode;"
+    "  }"
+    "  return null;"
+    " };"
+    " var restore=function(){"
+    "  if(open&&open.box&&open.box.parentNode){"
+    "   open.box.parentNode.replaceChild(open.el,open.box);"
+    "  }"
+    "  open=null;"
+    " };"
+    " var commit=function(){"
+    "  if(!open){return;}"
+    "  var payload={kind:'commit',pos:open.pos,text:open.box.value};"
+    "  restore();"
+    "  post(payload);"
+    " };"
+    " window.__mdSetEdit=function(flag){"
+    "  on=!!flag;"
+    "  if(!on){restore();}"
+    "  document.body.classList.toggle('mdedit',on);"
+    " };"
+    " window.__mdCancelEdit=restore;"
+    " window.__mdOpenBlock=function(pos,text){"
+    "  var els=document.querySelectorAll('[data-pos]'),el=null,i;"
+    "  for(i=0;i<els.length;i++){"
+    "   if(els[i].getAttribute('data-pos')===pos){el=els[i];break;}"
+    "  }"
+    "  if(!el){return;}"
+    "  restore();"
+    "  var box=document.createElement('textarea');"
+    "  box.className='mdedit-box';"
+    "  box.value=text;"
+    "  box.rows=Math.max(2,text.split('\\n').length);"
+    "  el.parentNode.replaceChild(box,el);"
+    "  open={pos:pos,el:el,box:box};"
+    "  box.addEventListener('keydown',function(ev){"
+    "   if(ev.key==='Escape'){ev.preventDefault();restore();post({kind:'cancel'});}"
+    "   else if(ev.key==='Enter'&&(ev.ctrlKey||ev.metaKey)){ev.preventDefault();commit();}"
+    "  });"
+    "  box.addEventListener('blur',function(){if(open&&open.box===box){commit();}});"
+    "  box.focus();"
+    " };"
+    " document.addEventListener('click',function(ev){"
+    "  if(!on){return;}"
+    "  if(open&&open.box&&open.box.contains(ev.target)){return;}"
+    "  var el=blockAt(ev.target);"
+    "  if(!el){return;}"
+    "  ev.preventDefault();"
+    "  post({kind:'request',pos:el.getAttribute('data-pos')});"
+    " },true);"
+    "})();"
+    "</script>"
+)
+
 HTML_TEMPLATE = (
     "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-    "<style>{css}</style></head><body>{body}{base}{script}</body></html>"
+    "<style>{css}</style></head><body>{body}{base}{edit}{script}</body></html>"
 )
 
 
@@ -373,6 +457,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._sync_lock = False
         self._lock_owner = None
         self._pending_line = None
+        self._edit_mode = False
+        self._edit_pos = None
+        self._edit_text = None
+        self._applying_edit = False
 
     def do_activate(self):
         self._scrolled = Gtk.ScrolledWindow()
@@ -382,6 +470,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         ucm = WebKit2.UserContentManager()
         ucm.register_script_message_handler("mdscroll")
         ucm.connect("script-message-received::mdscroll", self._on_scroll_message)
+        ucm.register_script_message_handler("mdedit")
+        ucm.connect("script-message-received::mdedit", self._on_edit_message)
         self._webview = WebKit2.WebView.new_with_user_content_manager(ucm)
         # Allow the rendered page (loaded via load_html with a file:// base) to
         # read local image files referenced by relative or file:// paths.
@@ -415,6 +505,10 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         )
         self._level_action.connect("change-state", self._on_level_change)
         self.window.add_action(self._level_action)
+
+        edit = Gio.SimpleAction(name="markdown-preview-edit")
+        edit.connect("activate", self._toggle_edit_mode)
+        self.window.add_action(edit)
 
         for name, delta in (("zoom-in", ZOOM_STEP), ("zoom-out", -ZOOM_STEP),
                             ("zoom-reset", 0.0)):
@@ -460,6 +554,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self.window.remove_action("markdown-preview")
         self.window.remove_action("markdown-preview-export")
         self.window.remove_action("markdown-preview-level")
+        self.window.remove_action("markdown-preview-edit")
         for name in ("zoom-in", "zoom-out", "zoom-reset"):
             self.window.remove_action("markdown-preview-" + name)
 
@@ -628,6 +723,104 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         # share last in use rather than to a fixed one.
         self._set_level(0 if self._level > 0 else self._last_shown)
 
+    # --- editing a block in the rendered page --------------------------------
+    def _pos_range(self, pos):
+        # pandoc writes "start:col-end:col" with the end exclusive, so a block on
+        # a single line reads 1:1-2:1. Returned zero based, end exclusive.
+        head, _, tail = pos.partition("-")
+        start = int(head.split(":")[0]) - 1
+        end = int(tail.split(":")[0]) - 1
+        return max(0, start), max(start + 1, end)
+
+    def _range_iters(self, start, end):
+        buf = self._doc
+        first = buf.get_iter_at_line(min(start, buf.get_line_count() - 1))
+        if end >= buf.get_line_count():
+            last = buf.get_end_iter()
+        else:
+            last = buf.get_iter_at_line(end)
+        return first, last
+
+    def _range_text(self, start, end):
+        first, last = self._range_iters(start, end)
+        return self._doc.get_text(first, last, False)
+
+    def _toggle_edit_mode(self, *_args):
+        self._edit_mode = not self._edit_mode
+        if not self._edit_mode:
+            self._edit_pos = None
+            self._edit_text = None
+        self._push_edit_mode()
+
+    def _push_edit_mode(self):
+        self._webview.run_javascript(
+            "if(window.__mdSetEdit)window.__mdSetEdit(%s);"
+            % ("true" if self._edit_mode else "false"),
+            None, None, None,
+        )
+
+    def _cancel_open_block(self):
+        self._edit_pos = None
+        self._edit_text = None
+        self._webview.run_javascript(
+            "if(window.__mdCancelEdit)window.__mdCancelEdit();", None, None, None
+        )
+
+    def _on_edit_message(self, _ucm, result):
+        try:
+            report = json.loads(result.get_js_value().to_string())
+        except Exception:  # noqa: BLE001 - a malformed message must not break the panel
+            return
+        kind = report.get("kind")
+        if kind == "cancel":
+            self._edit_pos = None
+            self._edit_text = None
+        elif kind == "request":
+            self._open_block(report.get("pos", ""))
+        elif kind == "commit":
+            self._commit_block(report.get("pos", ""), report.get("text", ""))
+
+    def _open_block(self, pos):
+        if self._doc is None or not pos:
+            return
+        try:
+            start, end = self._pos_range(pos)
+        except ValueError:
+            return
+        text = self._range_text(start, end)
+        self._edit_pos = pos
+        self._edit_text = text
+        self._webview.run_javascript(
+            "if(window.__mdOpenBlock)window.__mdOpenBlock(%s,%s);"
+            % (json.dumps(pos), json.dumps(text)),
+            None, None, None,
+        )
+
+    def _commit_block(self, pos, text):
+        if self._doc is None or pos != self._edit_pos:
+            return
+        start, end = self._pos_range(pos)
+        # The range is only writable while it still holds exactly what was handed
+        # to the page. Anything else means the buffer moved underneath, and
+        # writing a stale range is how a document gets corrupted.
+        if self._range_text(start, end) != self._edit_text:
+            self._cancel_open_block()
+            self._update()
+            return
+        if self._edit_text.endswith("\n") and not text.endswith("\n"):
+            text += "\n"
+        buf = self._doc
+        first, last = self._range_iters(start, end)
+        self._applying_edit = True
+        buf.begin_user_action()
+        buf.delete(first, last)
+        buf.insert(first, text)
+        buf.end_user_action()
+        self._applying_edit = False
+        self._edit_pos = None
+        self._edit_text = None
+        self._update()
+
     # --- zoom of the rendered page ------------------------------------------
     def _on_zoom(self, _action, _param, delta):
         if delta:
@@ -676,7 +869,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             self._scroll_y = max(0, int(report.get("y", 0)))
         except (TypeError, ValueError, AttributeError):
             return
-        if not self._sync_lock and self._level > 0 and "line" in report:
+        if (not self._sync_lock and self._level > 0 and "line" in report
+                and self._edit_pos is None):
             self._scroll_editor_to_line(report["line"])
 
     def _restore_scroll(self):
@@ -691,6 +885,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
     def _on_load_changed(self, _webview, event):
         if event != WebKit2.LoadEvent.FINISHED:
             return
+        if self._edit_mode:
+            self._push_edit_mode()
         self._restore_scroll()
         # Mermaid and MathML change the page height after load, which clamps the
         # first restore on a document that grows below the fold.
@@ -758,7 +954,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         )
 
     def _on_editor_scroll(self, adj):
-        if self._level <= 0 or self._view is None:
+        if self._level <= 0 or self._view is None or self._edit_pos is not None:
             return
         if self._sync_lock and self._lock_owner == "preview":
             return
@@ -781,6 +977,12 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         self._vadj.set_value(y)
 
     def _on_changed(self, *_args):
+        if self._applying_edit:
+            return
+        if self._edit_pos is not None:
+            # The buffer moved under the open block, so its line range can no
+            # longer be trusted and the edit is dropped rather than misapplied.
+            self._cancel_open_block()
         if self._timeout:
             GLib.source_remove(self._timeout)
         self._timeout = GLib.timeout_add(DEBOUNCE_MS, self._update_now)
@@ -817,7 +1019,9 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         return "file:///"
 
     def _render(self, body, script=""):
-        return HTML_TEMPLATE.format(css=CSS, body=body, base=BASE_SCRIPT, script=script)
+        return HTML_TEMPLATE.format(
+            css=CSS, body=body, base=BASE_SCRIPT, edit=EDIT_SCRIPT, script=script
+        )
 
     def _update(self):
         doc = self.window.get_active_document()
@@ -844,6 +1048,7 @@ class MdPreviewAppActivatable(GObject.Object, Gedit.AppActivatable):
 
     def do_activate(self):
         self.app.set_accels_for_action("win.markdown-preview", ["<Primary>m"])
+        self.app.set_accels_for_action("win.markdown-preview-edit", ["<Primary>e"])
         # Plus needs shift on most layouts, and the shift stays in the modifier
         # state that GTK matches against, so the shifted spellings are bound too;
         # equal covers pressing the same key without shift, and the keypad has
@@ -871,6 +1076,10 @@ class MdPreviewAppActivatable(GObject.Object, Gedit.AppActivatable):
         if self._menu_ext is not None:
             item = Gio.MenuItem.new("Markdown Preview", "win.markdown-preview")
             self._menu_ext.append_menu_item(item)
+            edit = Gio.MenuItem.new(
+                "Edit in the render (Ctrl+E)", "win.markdown-preview-edit"
+            )
+            self._menu_ext.append_menu_item(edit)
             export = Gio.MenuItem.new(
                 "Export Markdown preview (PDF)", "win.markdown-preview-export"
             )
@@ -878,6 +1087,7 @@ class MdPreviewAppActivatable(GObject.Object, Gedit.AppActivatable):
 
     def do_deactivate(self):
         self.app.set_accels_for_action("win.markdown-preview", [])
+        self.app.set_accels_for_action("win.markdown-preview-edit", [])
         for name in ("zoom-in", "zoom-out", "zoom-reset"):
             self.app.set_accels_for_action("win.markdown-preview-" + name, [])
         self._menu_ext = None
