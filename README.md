@@ -97,10 +97,11 @@ it is provisioned at install time.
 
 The plugin adds a bottom panel holding a `WebKit2.WebView`. On each edit it runs
 the buffer through `pandoc --from=gfm+tex_math_dollars --to=html5 --mathml`,
-wraps the output in a small stylesheet, and loads it into the view. When the
-preview is on, the editor area is hidden so the panel fills the window, giving a
-full-page view rather than a split. Mermaid blocks are rendered client-side by
-`mermaid.js`, loaded only when a diagram is present.
+wraps the output in a small stylesheet, and loads it into the view. With
+`FULL_VIEW` on, the editor area is hidden while the preview is up, so the panel
+fills the window and reads as a page rather than a split; with it off, both stay
+visible. Mermaid blocks are rendered client-side by `mermaid.js`, loaded only
+when a diagram is present.
 
 Because each update reloads the page, the reading position would otherwise reset
 on every keystroke pause. The page reports its scroll offset back to the plugin
