@@ -276,6 +276,29 @@ table th { background: #f4f4f4; }
 body.mdedit [data-pos]:hover {
   outline: 2px dashed #2a76c6; outline-offset: 3px; cursor: text;
 }
+/* The bar reserves its width on the body instead of floating over the text, so
+   it cannot cover the column at any window size. */
+body.mdedit { padding-right: 6em; box-shadow: inset 0 0 0 2px rgba(42,118,198,.35); }
+#mdbar {
+  position: fixed; right: .7em; top: 50%; transform: translateY(-50%);
+  display: none; flex-direction: column; gap: .4em; width: 5em; z-index: 10;
+}
+body.mdedit #mdbar { display: flex; }
+#mdbar button {
+  font: inherit; font-size: .78em; padding: .45em .3em; cursor: pointer;
+  border: 1px solid #c3c3c3; border-radius: 6px; background: #fafafa; color: #2e3436;
+}
+#mdbar button:hover { border-color: #2a76c6; color: #2a76c6; }
+#mdbar.noblock button.needs-block { opacity: .4; cursor: default; }
+#mdbar.noblock button.needs-block:hover { border-color: #c3c3c3; color: #2e3436; }
+@media (prefers-color-scheme: dark) {
+  body.mdedit { box-shadow: inset 0 0 0 2px rgba(140,180,255,.35); }
+  #mdbar button { background: #2b2b2b; color: #d3d7cf; border-color: #555; }
+  #mdbar button:hover { border-color: #8cb4ff; color: #8cb4ff; }
+  #mdbar.noblock button.needs-block:hover { border-color: #555; color: #d3d7cf; }
+}
+@media print { #mdbar { display: none !important; } }
+
 textarea.mdedit-box {
   width: 100%; box-sizing: border-box; font-family: "Source Code Pro", monospace;
   font-size: .92em; line-height: 1.5; padding: .6em .8em; border: 2px solid #2a76c6;
@@ -348,12 +371,41 @@ EDIT_SCRIPT = (
     "   open.box.parentNode.replaceChild(open.el,open.box);"
     "  }"
     "  open=null;"
+    "  markOpen(false);"
     " };"
     " var commit=function(){"
     "  if(!open){return;}"
     "  var payload={kind:'commit',pos:open.pos,text:open.box.value};"
     "  restore();"
     "  post(payload);"
+    " };"
+    # The bar is built once and shown by the edit-mode class, so entering the
+    # mode costs nothing beyond a class change.
+    " var bar=null,barEl={};"
+    " var mkbtn=function(label,cls,fn){"
+    "  var b=document.createElement('button');"
+    "  b.textContent=label;"
+    "  if(cls){b.className=cls;}"
+    "  b.addEventListener('mousedown',function(ev){ev.preventDefault();});"
+    "  b.addEventListener('click',function(ev){ev.preventDefault();fn();});"
+    "  return b;"
+    " };"
+    " var buildBar=function(){"
+    "  bar=document.createElement('div');"
+    "  bar.id='mdbar';"
+    "  bar.className='noblock';"
+    "  barEl.ok=mkbtn('Confirm','needs-block',function(){commit();});"
+    "  barEl.no=mkbtn('Cancel','needs-block',function(){"
+    "   restore();post({kind:'cancel'});markOpen(false);"
+    "  });"
+    "  barEl.out=mkbtn('Exit','',function(){post({kind:'exit'});});"
+    "  bar.appendChild(barEl.ok);"
+    "  bar.appendChild(barEl.no);"
+    "  bar.appendChild(barEl.out);"
+    "  document.body.appendChild(bar);"
+    " };"
+    " var markOpen=function(flag){"
+    "  if(bar){bar.className=flag?'':'noblock';}"
     " };"
     " window.__mdSetEdit=function(flag){"
     "  on=!!flag;"
@@ -374,6 +426,7 @@ EDIT_SCRIPT = (
     "  box.rows=Math.max(2,text.split('\\n').length);"
     "  el.parentNode.replaceChild(box,el);"
     "  open={pos:pos,el:el,box:box};"
+    "  markOpen(true);"
     "  box.addEventListener('keydown',function(ev){"
     "   if(ev.key==='Escape'){ev.preventDefault();restore();post({kind:'cancel'});}"
     "   else if(ev.key==='Enter'&&(ev.ctrlKey||ev.metaKey)){ev.preventDefault();commit();}"
@@ -384,11 +437,13 @@ EDIT_SCRIPT = (
     " document.addEventListener('click',function(ev){"
     "  if(!on){return;}"
     "  if(open&&open.box&&open.box.contains(ev.target)){return;}"
+    "  if(bar&&bar.contains(ev.target)){return;}"
     "  var el=blockAt(ev.target);"
     "  if(!el){return;}"
     "  ev.preventDefault();"
     "  post({kind:'request',pos:el.getAttribute('data-pos')});"
     " },true);"
+    " buildBar();"
     "})();"
     "</script>"
 )
@@ -772,7 +827,12 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         except Exception:  # noqa: BLE001 - a malformed message must not break the panel
             return
         kind = report.get("kind")
-        if kind == "cancel":
+        if kind == "exit":
+            self._edit_mode = False
+            self._edit_pos = None
+            self._edit_text = None
+            self._push_edit_mode()
+        elif kind == "cancel":
             self._edit_pos = None
             self._edit_text = None
         elif kind == "request":

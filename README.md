@@ -33,6 +33,11 @@ view.
   laid out.
 - **Diagram errors are visible**: a malformed Mermaid diagram shows its parse
   error in place instead of leaving a blank area.
+- **Edit in the render**, one block at a time. `Ctrl+E` turns edit mode on, and
+  clicking a block replaces it with the Markdown of the source lines that
+  produced it. Confirming rewrites exactly those lines and nothing else: the
+  page never converts HTML back to Markdown, so the rest of your file keeps the
+  formatting you gave it. A bar on the right carries confirm, cancel and exit.
 - **Zoom the rendered page** with `Ctrl` and plus, minus or zero. The level is a
   property of the view, so it survives the live re-render.
 - **The two views scroll together**, in both directions: moving the editor moves
@@ -78,6 +83,12 @@ it via `gsettings`. It is idempotent; run it again to update.
 - On a document with three or more headings, an outline is built: at the left as
   a side rail in a wide window, or as a collapsible "Outline" block at the top
   in a narrow one. Click an entry to jump to that section.
+- `Ctrl+E` toggles edit mode. In it, hovering outlines the block under the
+  pointer and clicking opens it for editing as Markdown; `Ctrl+Enter` or a
+  click outside confirms, `Esc` cancels. The change lands in the editor as a
+  single undo step. While a block is open the live update and the scroll sync
+  are suspended, and if the buffer changes from the editor side the open block
+  is dropped rather than written to a line range that has moved.
 - `Ctrl` with plus or minus zooms the rendered page in steps of ten percent,
   between half and triple size; `Ctrl` with zero returns it to 100%. Zooming
   changes the width available to the outline, so a large enough zoom moves it
@@ -124,6 +135,12 @@ on every keystroke pause. The page reports its scroll offset back to the plugin
 through a WebKit script message handler, and the plugin restores that offset
 once the new content has loaded, plus once more shortly after when diagrams or
 math are present, since those change the page height asynchronously.
+
+`sourcepos` also makes editing in the render safe: the block a click lands in
+names the source lines it came from, so a commit replaces that range and leaves
+the rest of the file byte for byte. The bar reserves its width with padding on
+the body rather than floating over the text, which keeps it clear of the column
+at every window size.
 
 `sourcepos` is what ties the two scroll positions together: it tags every block
 with the source line it came from, and the plugin interpolates between the two
