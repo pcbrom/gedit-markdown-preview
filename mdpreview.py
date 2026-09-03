@@ -84,8 +84,11 @@ BASE_SCRIPT = (
     " window.addEventListener('scroll',send,{passive:true});"
     " var hs=document.querySelectorAll('h1,h2,h3');"
     " if(hs.length<" + str(TOC_MIN_HEADINGS) + "){return;}"
-    " var nav=document.createElement('nav');"
+    " var nav=document.createElement('details');"
     " nav.id='mdtoc';"
+    " var cap=document.createElement('summary');"
+    " cap.textContent='Outline';"
+    " nav.appendChild(cap);"
     " for(var i=0;i<hs.length;i++){"
     "  var h=hs[i];"
     "  if(!h.id){h.id='mdh'+i;}"
@@ -95,7 +98,10 @@ BASE_SCRIPT = (
     "  a.className='lv'+h.tagName.charAt(1);"
     "  nav.appendChild(a);"
     " }"
-    " document.body.appendChild(nav);"
+    # Wide enough for the side rail: open it and hide the caption. Narrow: it
+    # becomes a collapsed block at the top, so it never squeezes the text.
+    " nav.open=window.matchMedia('(min-width: 66em)').matches;"
+    " document.body.insertBefore(nav,document.body.firstChild);"
     "})();"
     "</script>"
 )
@@ -148,18 +154,27 @@ table th { background: #f4f4f4; }
   .mmd-error { background: #2a1b1b; border-left-color: #e06c6c; color: #f0b0b0; }
 }
 
-/* Outline for long documents. Only shown when the window is wide enough that
-   it does not crowd the text column. */
-#mdtoc {
-  position: fixed; top: 2.5em; left: 1.5em; width: 14em; max-height: 80vh;
-  overflow-y: auto; font-size: .82em; line-height: 1.45; display: none;
-}
+/* Outline for long documents. Only shown when the window is wide enough that it
+   does not crowd the text column: the 46em column plus a 14em outline plus the
+   left margin and a gutter need 64.5em, so 66em is the first safe step. */
+#mdtoc { font-size: .82em; line-height: 1.45; margin: 0 0 2em; }
+#mdtoc > summary { cursor: pointer; color: #6b6b6b; font-weight: 600; }
 #mdtoc a { display: block; color: #6b6b6b; text-decoration: none; padding: .1em 0; }
 #mdtoc a:hover { color: #2a76c6; text-decoration: none; }
 #mdtoc a.lv2 { padding-left: .9em; }
 #mdtoc a.lv3 { padding-left: 1.8em; }
-@media (min-width: 82em) { #mdtoc { display: block; } }
+/* Wide enough for a side rail beside the text column: pin it and drop the
+   caption. Below that it stays a collapsed block at the top of the document,
+   which is why the outline is available at any width. */
+@media (min-width: 66em) {
+  #mdtoc {
+    position: fixed; top: 2.5em; left: 1.5em; width: 14em; max-height: 80vh;
+    overflow-y: auto; margin: 0;
+  }
+  #mdtoc > summary { display: none; }
+}
 @media (prefers-color-scheme: dark) {
+  #mdtoc > summary { color: #9a9a9a; }
   #mdtoc a { color: #9a9a9a; }
   #mdtoc a:hover { color: #8cb4ff; }
 }

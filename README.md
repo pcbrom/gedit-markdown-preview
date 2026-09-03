@@ -26,9 +26,10 @@ and formatted.
   top.
 - **Syntax highlighting** in fenced code blocks, done offline by pandoc and
   colored by the bundled stylesheet. No JavaScript highlighter, no CDN.
-- **Outline for long documents**: three or more headings produce a fixed
-  navigable index, shown only when the window is wide enough to hold it without
-  crowding the text column.
+- **Outline for long documents**: three or more headings produce a navigable
+  index. It adapts to the space available: a pinned side rail when the window is
+  wide enough to hold it beside the text column, and a collapsible block at the
+  top of the document when it is not, so the outline is reachable at any width.
 - **Export to PDF** through the print dialog, with diagrams and math already
   laid out.
 - **Diagram errors are visible**: a malformed Mermaid diagram shows its parse
@@ -68,8 +69,9 @@ it via `gsettings`. It is idempotent; run it again to update.
   "Markdown Preview".
 - The preview replaces the editor while active; toggle again to return to the
   raw text.
-- On a document with three or more headings, an outline appears at the left when
-  the window is wide enough; click an entry to jump to that section.
+- On a document with three or more headings, an outline is built: at the left as
+  a side rail in a wide window, or as a collapsible "Outline" block at the top
+  in a narrow one. Click an entry to jump to that section.
 - To export, use the menu entry "Export Markdown preview (PDF)" and pick
   "Print to File" in the dialog. Export prints the rendered page, which is why
   it produces PDF rather than HTML: the bundled `mermaid.js` is referenced by
