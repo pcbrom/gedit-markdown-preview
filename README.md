@@ -39,7 +39,9 @@ view.
   page never converts HTML back to Markdown, so the rest of your file keeps the
   formatting you gave it. A bar on the right carries bold, italic, heading,
   list, code, link and table, plus confirm, cancel and exit, as Lucide icons
-  with a tooltip that says what each one does. Every formatting action undoes
+  with a tooltip that says what each one does. The bar stays on screen and the
+  pencil turns edit mode on and off, so the space it takes is reserved at all
+  times and the text never runs under it. Every formatting action undoes
   itself: apply it twice and the text is back as it was.
 - **Stacked or side by side**: a button to the left of the share control swaps
   the split. Stacked, the preview sits below the editor and is the default;
