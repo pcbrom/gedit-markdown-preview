@@ -202,7 +202,7 @@ CSS = """
 :root { color-scheme: light dark; }
 html { font-size: 16px; }
 body {
-  margin: 0 auto; max-width: 46em; padding: 2.5em 2em 6em;
+  margin: 0 auto; max-width: 46em; padding: 2.5em 3.5em 6em 2em;
   font-family: "Cantarell", "Noto Sans", system-ui, sans-serif;
   line-height: 1.65; color: #2e3436; background: #fdfdfd;
   -webkit-font-smoothing: antialiased; word-wrap: break-word;
@@ -278,12 +278,14 @@ body.mdedit [data-pos]:hover {
 }
 /* The bar reserves its width on the body instead of floating over the text, so
    it cannot cover the column at any window size. */
-body.mdedit { padding-right: 3.5em; box-shadow: inset 0 0 0 2px rgba(42,118,198,.35); }
+/* Only the frame marks edit mode now: the bar itself is always on screen, and
+   its width is reserved on the body at all times so the text never runs under
+   it, in either mode. */
+body.mdedit { box-shadow: inset 0 0 0 2px rgba(42,118,198,.35); }
 #mdbar {
   position: fixed; right: .6em; top: 50%; transform: translateY(-50%);
-  display: none; flex-direction: column; gap: .25em; width: 2.4em; z-index: 10;
+  display: flex; flex-direction: column; gap: .25em; width: 2.4em; z-index: 10;
 }
-body.mdedit #mdbar { display: flex; }
 #mdbar button {
   position: relative; width: 2.4em; height: 2.4em; padding: 0; cursor: pointer;
   display: flex; align-items: center; justify-content: center;
@@ -380,6 +382,7 @@ ICONS = {
     "table": "<path d=\"M12 3v18\"/><rect width=\"18\" height=\"18\" x=\"3\" y=\"3\" rx=\"2\"/><path d=\"M3 9h18\"/><path d=\"M3 15h18\"/>",
     "check": "<path d=\"M20 6 9 17l-5-5\"/>",
     "x": "<path d=\"M18 6 6 18\"/><path d=\"m6 6 12 12\"/>",
+    "pencil": "<path d=\"M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z\"/><path d=\"m15 5 4 4\"/>",
     "pencil-off": "<path d=\"m10 10-6.157 6.162a2 2 0 0 0-.5.833l-1.322 4.36a.5.5 0 0 0 .622.624l4.358-1.323a2 2 0 0 0 .83-.5L14 13.982\"/><path d=\"m12.829 7.172 4.359-4.346a1 1 0 1 1 3.986 3.986l-4.353 4.353\"/><path d=\"m15 5 4 4\"/><path d=\"m2 2 20 20\"/>"
 }
 SVG_OPEN = (
@@ -398,6 +401,7 @@ TIPS = {
     "table": "Table: inserts a header, a separator and one row.",
     "check": "Confirm (Ctrl+Enter): writes the block back to its source lines.",
     "x": "Cancel (Esc): discards the edit.",
+    "pencil": "Edit in the render: turns edit mode on (Ctrl+E).",
     "pencil-off": "Leave edit mode (Ctrl+E)."
 }
 
@@ -502,6 +506,17 @@ EDIT_SCRIPT = (
     "  b.addEventListener('click',function(ev){ev.preventDefault();fn();});"
     "  return b;"
     " };"
+    " var toggleBtn=null;"
+    " var setToggle=function(flag){"
+    "  if(!toggleBtn){return;}"
+    "  var id=flag?'pencil-off':'pencil';"
+    "  toggleBtn.innerHTML=SVG+ICONS[id]+'</svg>';"
+    "  var t=document.createElement('span');"
+    "  t.className='tip';"
+    "  t.textContent=TIPS[id];"
+    "  toggleBtn.appendChild(t);"
+    "  toggleBtn.setAttribute('aria-label',TIPS[id]);"
+    " };"
     " var buildBar=function(){"
     "  bar=document.createElement('div');"
     "  bar.id='mdbar';"
@@ -527,13 +542,15 @@ EDIT_SCRIPT = (
     "  bar.appendChild(mkbtn('x','needs-block',function(){"
     "   restore();post({kind:'cancel'});"
     "  }));"
-    "  bar.appendChild(mkbtn('pencil-off','',function(){post({kind:'exit'});}));"
+    "  toggleBtn=mkbtn('pencil','',function(){post({kind:'toggle'});});"
+    "  bar.appendChild(toggleBtn);"
     "  document.body.appendChild(bar);"
     " };"
     " window.__mdSetEdit=function(flag){"
     "  on=!!flag;"
     "  if(!on){restore();}"
     "  document.body.classList.toggle('mdedit',on);"
+    "  setToggle(on);"
     " };"
     " window.__mdCancelEdit=restore;"
     " window.__mdOpenBlock=function(pos,text){"
@@ -951,11 +968,8 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
         except Exception:  # noqa: BLE001 - a malformed message must not break the panel
             return
         kind = report.get("kind")
-        if kind == "exit":
-            self._edit_mode = False
-            self._edit_pos = None
-            self._edit_text = None
-            self._push_edit_mode()
+        if kind == "toggle":
+            self._toggle_edit_mode()
         elif kind == "cancel":
             self._edit_pos = None
             self._edit_text = None
