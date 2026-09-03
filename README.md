@@ -10,6 +10,8 @@ and formatted.
 
 - **Full-view toggle**, not a split: the preview takes the whole area, so it
   reads like a page. Flip back to the editor with the same control.
+  Set `FULL_VIEW = False` near the top of `mdpreview.py` to keep the editor
+  visible alongside the preview instead, which is what live editing wants.
 - **Three ways to toggle**: a button in the header bar, `Ctrl+M`, or the menu
   entry. The button reflects the current mode.
 - **Live updates** as you type (debounced).

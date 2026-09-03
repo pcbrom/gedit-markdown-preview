@@ -21,6 +21,10 @@ import re
 import html as _html
 
 PANEL_NAME = "MdPreviewPanel"
+# Full view hides the editor so the preview fills the window; split keeps both
+# visible. Split is what live editing wants, since the buffer can only change
+# while the editor is reachable, and it is the mode the scroll restore serves.
+FULL_VIEW = True
 DEBOUNCE_MS = 500
 # Second scroll restore, after async content (mermaid, MathML) changes the page
 # height and clamps the first one.
@@ -398,7 +402,7 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             self._update()
             panel.props.visible_child = self._scrolled
             panel.set_visible(True)
-            if docs is not None:
+            if FULL_VIEW and docs is not None:
                 docs.hide()
         else:
             if docs is not None:
@@ -420,6 +424,12 @@ class MdPreviewWindowActivatable(GObject.Object, Gedit.WindowActivatable):
             if docs is not None:
                 docs.show()
             self._active = False
+        elif not self._active and not away:
+            # The panel was opened by other means (its own tab, the View menu).
+            # Adopt it, so the header-bar button reflects what is on screen and
+            # the preview is refreshed for the current document.
+            self._active = True
+            self._update()
         self._sync_button()
 
     def _toggle(self, *_args):
